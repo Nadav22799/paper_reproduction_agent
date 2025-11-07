@@ -1,0 +1,133 @@
+# ============================================================================
+# Python Environment
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ============================================================================
+# Virtual Environments
+# ============================================================================
+venv/
+env/
+ENV/
+.venv
+
+# Environment variables (anywhere in project)
+.env
+**/.env
+.env.local
+.env.*.local
+
+# ============================================================================
+# Runtime Directories (created during paper reproduction)
+# ============================================================================
+# Cloned repositories (each paper's implementation gets cloned here)
+cloned_repo/*
+!cloned_repo/README.md
+!cloned_repo/.gitkeep
+
+# Downloaded papers and datasets (anywhere in project)
+downloads/*
+**/downloads/*
+!downloads/.gitkeep
+!**/downloads/.gitkeep
+
+# Runtime logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Temporary/trash files
+trash/
+temp/
+tmp/
+
+# Test and development directories
+test_paper/
+tests/
+docs/
+
+# ============================================================================
+# IDEs and Editors
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================================================================
+# Environment Variables and Secrets
+# ============================================================================
+.env
+.env.local
+.env.*.local
+*.key
+secrets/
+credentials/
+
+# ============================================================================
+# Testing and Coverage
+# ============================================================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ============================================================================
+# Jupyter Notebooks
+# ============================================================================
+.ipynb_checkpoints/
+*.ipynb
+
+# ============================================================================
+# Documentation Build Files
+# ============================================================================
+docs/_build/
+site/
+
+# ============================================================================
+# OS Files
+# ============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ============================================================================
+# Temporary output files
+# ============================================================================
+*.txt
+!requirements.txt
+!**/requirements.txt
+
+# ============================================================================
+# Keep Directory Structure
+# ============================================================================
+# Don't ignore .gitkeep files (used to preserve empty directory structure)
+!.gitkeep
+!**/.gitkeep
