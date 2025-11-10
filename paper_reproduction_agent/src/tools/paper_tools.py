@@ -46,7 +46,6 @@ def fetch_arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"Failed to fetch paper: {str(e)}"}
 
-
 @tool
 def extract_text_from_pdf(pdf_path: str) -> str:
     """
