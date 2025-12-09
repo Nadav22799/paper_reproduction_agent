@@ -12,13 +12,37 @@ except RuntimeError:
 import os
 import sys
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 
-# Add src directory to Python path for module imports
+# Load environment variables from .env file
+load_dotenv()
+
+
+class TeeOutput:
+    """Redirect stdout to both console and file."""
+
+    def __init__(self, log_file):
+        self.terminal = sys.stdout
+        self.log_file = open(log_file, 'w', encoding='utf-8')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log_file.write(message)
+        self.log_file.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def close(self):
+        self.log_file.close()
+
+# Add parent directory to Python path for module imports
 script_dir = Path(__file__).parent
-src_dir = script_dir / "src"
-if str(src_dir) not in sys.path:
-    sys.path.insert(0, str(src_dir))
+parent_dir = script_dir.parent  # Agents/ directory
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
 
 # Load environment variables from the script's directory
 env_path = script_dir / ".env"
@@ -77,24 +101,34 @@ def run_paper_reproduction(paper_input: str):
             - PDF path: "/path/to/paper.pdf"
             - Paper title: "Attention Is All You Need"
     """
-    from src.orchestrator import PaperReproductionOrchestrator
+    from paper_reproduction_agent.src.orchestrator import PaperReproductionOrchestrator
 
-    print("\n" + "="*70)
-    print("🚀 PAPER REPRODUCTION AGENT")
-    print("="*70)
-    print(f"\n📄 Input: {paper_input}\n")
+    # Setup logging - capture ALL prints to file
+    log_dir = script_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"execution_{timestamp}.log"
 
-    # Initialize orchestrator
-    orchestrator = PaperReproductionOrchestrator()
+    # Redirect stdout to both console and file
+    tee = TeeOutput(log_file)
+    sys.stdout = tee
 
-    # Format input
-    if paper_input.isdigit() or (len(paper_input.split()) == 1 and "." in paper_input):
-        # Looks like arXiv ID
-        if not paper_input.startswith("arxiv:"):
-            paper_input = f"arxiv:{paper_input}"
-
-    # Run workflow
     try:
+        print("\n" + "="*70)
+        print("🚀 PAPER REPRODUCTION AGENT")
+        print("="*70)
+        print(f"\n📄 Input: {paper_input}\n")
+
+        # Initialize orchestrator (disable its internal file_logger to avoid duplication)
+        orchestrator = PaperReproductionOrchestrator(enable_logging=False)
+
+        # Format input
+        if paper_input.isdigit() or (len(paper_input.split()) == 1 and "." in paper_input):
+            # Looks like arXiv ID
+            if not paper_input.startswith("arxiv:"):
+                paper_input = f"arxiv:{paper_input}"
+
+        # Run workflow
         result = orchestrator.run(paper_input)
 
         print("\n" + "="*70)
@@ -109,6 +143,12 @@ def run_paper_reproduction(paper_input: str):
         import traceback
         traceback.print_exc()
         return None
+
+    finally:
+        # Restore stdout and close log file
+        sys.stdout = tee.terminal
+        tee.close()
+        print(f"\n📝 Full execution log saved to: {log_file}")
 
 
 def main():

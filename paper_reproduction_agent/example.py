@@ -2,7 +2,7 @@
 
 import os
 from dotenv import load_dotenv
-from src.orchestrator import PaperReproductionOrchestrator
+from paper_reproduction_agent.src.orchestrator import PaperReproductionOrchestrator
 
 # Load environment variables
 load_dotenv()

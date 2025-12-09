@@ -1,11 +1,11 @@
-"""LangGraph Orchestrator - Main workflow for paper reproduction."""
+"""Clean LangGraph Orchestrator - Simplified workflow for paper reproduction."""
 
 from typing import TypedDict, Annotated, Literal
 from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
 import operator
-import signal
-from contextlib import contextmanager
+import os
+import subprocess
+import shutil
 
 
 # Define the overall state for the entire workflow
@@ -17,102 +17,55 @@ class PaperReproductionState(TypedDict):
 
     # Paper Analysis
     paper_metadata: dict
-    algorithms: list
     experimental_setup: dict
     paper_results: dict
     code_references: list
 
-    # Code Search
-    existing_repos: list
-    selected_repo: dict
-    repo_quality_score: float
-
     # Implementation
+    selected_repo: dict
     implementation_path: str
-    code_created: bool
 
-    # Environment Setup
+    # Reproduction Results
     env_setup_results: dict
     dependencies_installed: bool
-
-    # Dataset Preparation
     dataset_results: dict
     datasets_ready: bool
-
-    # Experiment Execution
     experiment_results: dict
     experiments_completed: bool
 
-    # Metrics Extraction
+    # Metrics & Verification
     extracted_metrics: dict
     metrics_comparison: dict
-
-    # Verification
     verification_results: dict
     results_match: bool
 
-    # Debugging
-    errors_found: list
-    fixes_applied: list
-    debug_attempts: int
-
-    # Agent Context History - NEW!
-    agent_contexts: dict  # Stores summary from each agent for next agents to use
+    # Agent Context History
+    agent_contexts: dict
 
     # Overall
     messages: Annotated[list, operator.add]
-    next_step: str
     final_status: str
     report: str
 
 
-class TimeoutException(Exception):
-    """Exception raised when operation times out."""
-    pass
-
-
-@contextmanager
-def timeout(seconds):
-    """Context manager for timeout."""
-    def timeout_handler(signum, frame):
-        raise TimeoutException(f"Operation timed out after {seconds} seconds")
-
-    # Set the signal handler
-    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
-
-
 class PaperReproductionOrchestrator:
-    """Main orchestrator for paper reproduction workflow."""
+    """Simplified orchestrator for paper reproduction workflow."""
 
-    def __init__(self, llm=None, search_timeout=60, enable_logging=True):
+    def __init__(self, llm=None, enable_logging=True):
         """Initialize the orchestrator.
 
         Args:
             llm: Language model to use
-            search_timeout: Timeout in seconds for code search (default: 60)
             enable_logging: Whether to enable detailed logging to file
         """
-        from .agents.paper_analyzer import PaperAnalyzerAgent
-        from .agents.code_searcher import CodeSearcherAgent
-        from .agents.code_reproducer import CodeReproducerAgent
-        from .agents.code_verifier import CodeVerifierAgent
-        from .agents.code_debugger import CodeDebuggerAgent
-        from .agents.environment_setup import EnvironmentSetupAgent
-        from .agents.dataset_manager import DatasetManagerAgent
-        from .agents.experiment_runner import ExperimentRunnerAgent
+        # Only import agents that are actually used
+        from .agents.unified_reproduction_agent import UnifiedReproductionAgent
         from .agents.metrics_extractor import MetricsExtractorAgent
         from .utils.llm_factory import create_llm
         from .utils.file_logger import FileLogger
         from .utils.logging_callback import LoggingCallbackHandler
 
         self.llm = llm or create_llm(temperature=0.1)
-        self.search_timeout = search_timeout
 
         # Setup logging
         self.enable_logging = enable_logging
@@ -122,130 +75,113 @@ class PaperReproductionOrchestrator:
             self.file_logger = FileLogger(log_dir="./logs")
             self.logging_callback = LoggingCallbackHandler(verbose=True, file_logger=self.file_logger)
 
-        # Initialize all agents
-        # Only EnvironmentSetupAgent currently supports callbacks
-        self.paper_analyzer = PaperAnalyzerAgent(self.llm)
-        self.code_searcher = CodeSearcherAgent(self.llm)
-        self.code_reproducer = CodeReproducerAgent(self.llm)
-        self.code_verifier = CodeVerifierAgent(self.llm)
-        self.code_debugger = CodeDebuggerAgent(self.llm)
-        # Use max_iterations=10 to prevent dependency hell loops
-        self.env_setup = EnvironmentSetupAgent(
-            self.llm,
-            callback=self.logging_callback,
-            max_iterations=10
-        )
-        self.dataset_manager = DatasetManagerAgent(self.llm)
-        self.experiment_runner = ExperimentRunnerAgent(self.llm)
+        # Initialize only the agents we actually use
+        self.unified_reproducer = UnifiedReproductionAgent(self.llm, max_iterations=50)
         self.metrics_extractor = MetricsExtractorAgent(self.llm)
 
         # Build the workflow graph
         self.workflow = self._build_workflow()
 
     def _build_workflow(self) -> StateGraph:
-        """Build the LangGraph workflow."""
+        """Build the simplified LangGraph workflow."""
         workflow = StateGraph(PaperReproductionState)
 
-        # Add nodes for each agent/step
+        # Add nodes - only 5 instead of 9
         workflow.add_node("analyze_paper", self._analyze_paper_node)
-        workflow.add_node("search_code", self._search_code_node)
-        workflow.add_node("decide_path", self._decide_path_node)
-        workflow.add_node("reproduce_code", self._reproduce_code_node)
-        workflow.add_node("setup_environment", self._setup_environment_node)
-        workflow.add_node("prepare_datasets", self._prepare_datasets_node)
-        workflow.add_node("run_experiments", self._run_experiments_node)
-        workflow.add_node("extract_metrics", self._extract_metrics_node)
-        workflow.add_node("verify_code", self._verify_code_node)
-        workflow.add_node("debug_code", self._debug_code_node)
+        workflow.add_node("decide_and_clone", self._decide_and_clone_node)
+        workflow.add_node("unified_reproduction", self._unified_reproduction_node)
+        workflow.add_node("extract_and_verify", self._extract_and_verify_node)
         workflow.add_node("generate_report", self._generate_report_node)
 
         # Define the workflow edges
         workflow.set_entry_point("analyze_paper")
 
-        workflow.add_edge("analyze_paper", "search_code")
-        workflow.add_edge("search_code", "decide_path")
+        workflow.add_edge("analyze_paper", "decide_and_clone")
 
-        # Conditional routing from decide_path
+        # Conditional routing from decide_and_clone
         workflow.add_conditional_edges(
-            "decide_path",
-            self._route_after_search,
+            "decide_and_clone",
+            self._route_after_clone,
             {
-                "use_existing": "setup_environment",
-                "create_new": "reproduce_code",
+                "continue": "unified_reproduction",
                 "failed": "generate_report",
             }
         )
 
-        workflow.add_edge("reproduce_code", "setup_environment")
-
-        # Conditional routing after setup_environment - stop if failed
+        # Conditional routing after unified_reproduction
         workflow.add_conditional_edges(
-            "setup_environment",
-            self._route_after_setup,
+            "unified_reproduction",
+            self._route_after_reproduction,
             {
-                "continue": "prepare_datasets",
+                "continue": "extract_and_verify",
                 "failed": "generate_report",
             }
         )
 
-        workflow.add_edge("prepare_datasets", "run_experiments")
-        workflow.add_edge("run_experiments", "extract_metrics")
-        workflow.add_edge("extract_metrics", "verify_code")
-
-        # Conditional routing from verify_code
-        workflow.add_conditional_edges(
-            "verify_code",
-            self._route_after_verification,
-            {
-                "success": "generate_report",
-                "needs_debug": "debug_code",
-            }
-        )
-
-        # Conditional routing from debug_code
-        workflow.add_conditional_edges(
-            "debug_code",
-            self._route_after_debug,
-            {
-                "retry_verify": "verify_code",
-                "give_up": "generate_report",
-            }
-        )
-
+        workflow.add_edge("extract_and_verify", "generate_report")
         workflow.add_edge("generate_report", END)
 
         return workflow.compile()
 
     def _analyze_paper_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Analyze the paper using UnifiedPaperAnalyzer - simplified single-pass approach."""
+        """Analyze the paper using UnifiedPaperAnalyzer."""
         print("📄 Analyzing paper...")
 
-        # Step 1: Fetch the paper PDF and extract text (do it ourselves, no @tool issues)
         paper_input = state["paper_input"]
+
+        # Handle arXiv papers
         if paper_input.startswith("arxiv:") or (len(paper_input.split()) == 1 and "." in paper_input):
-            # It's an arXiv ID - fetch it directly
             arxiv_id = paper_input.replace("arxiv:", "")
-            print(f"📥 Fetching arXiv paper {arxiv_id} directly...")
+            print(f"📥 Fetching arXiv paper {arxiv_id}...")
 
             try:
                 import arxiv
-                import os
                 from PyPDF2 import PdfReader
+                from urllib.request import urlretrieve
+                import re
+                import textwrap
 
                 # Fetch paper metadata
                 search = arxiv.Search(id_list=[arxiv_id])
                 paper = next(search.results())
 
                 # Download PDF
-                download_dir = "./downloads"
+                download_dir = os.path.abspath("./downloads")
                 os.makedirs(download_dir, exist_ok=True)
-                pdf_path = paper.download_pdf(dirpath=download_dir)
+
+                safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
+                filename = f"{safe_arxiv_id}.pdf"
+                pdf_path = os.path.join(download_dir, filename)
+
+                pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+                print(f"   Downloading from: {pdf_url}")
+                urlretrieve(pdf_url, pdf_path)
 
                 # Extract text from PDF
                 reader = PdfReader(pdf_path)
                 full_text = ""
                 for page in reader.pages:
                     full_text += page.extract_text() + "\n"
+
+                # Truncate before bibliography/appendix
+                truncate_patterns = [
+                    r'\n\s*\d+\.?\s+References\s*\n',
+                    r'\n\s*\d+\.?\s+Bibliography\s*\n',
+                    r'\nReferences\s*\n',
+                    r'\nBibliography\s*\n',
+                    r'\nREFERENCES\s*\n',
+                    r'\n\s*[A-Z]\.?\s+Appendix',
+                    r'\nAppendix\s+[A-Z]',
+                    r'\nAPPENDIX',
+                    r'\n\s*Supplementary\s+Material\s*\n',
+                    r'\n\s*Acknowledgment',
+                ]
+                for pattern in truncate_patterns:
+                    match = re.search(pattern, full_text)
+                    if match:
+                        full_text = full_text[:match.start()]
+                        print(f"📄 Truncated paper at '{match.group().strip()}'")
+                        break
 
                 # Store metadata
                 state["paper_metadata"] = {
@@ -254,7 +190,7 @@ class PaperReproductionOrchestrator:
                     "abstract": paper.summary,
                     "published": paper.published.isoformat(),
                     "arxiv_id": arxiv_id,
-                    "pdf_url": paper.pdf_url,
+                    "pdf_url": pdf_url,
                     "full_text": full_text,
                     "categories": paper.categories,
                 }
@@ -263,9 +199,11 @@ class PaperReproductionOrchestrator:
 
             except Exception as e:
                 print(f"⚠️  Failed to fetch paper: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 return state
 
-        # Step 2: Use unified analyzer to extract EVERYTHING in one LLM call
+        # Analyze paper with unified analyzer
         full_text = state.get("paper_metadata", {}).get("full_text", "")
         if full_text:
             print("🔬 Analyzing paper with unified analyzer...")
@@ -285,105 +223,12 @@ class PaperReproductionOrchestrator:
             # Store agent context for future agents
             state["agent_contexts"]["paper_analyzer"] = analysis.get("context_summary", "")
 
-            # Print detailed analysis results
-            print("\n" + "="*80)
-            print("📊 UNIFIED ANALYZER FINDINGS")
-            print("="*80)
+            # Print analysis summary
+            self._print_analysis_summary(state, analysis)
 
-            # GitHub Repositories
-            print(f"\n📚 GitHub Repositories Found: {len(state['code_references'])}")
-            for i, repo in enumerate(state['code_references'], 1):
-                print(f"   {i}. {repo}")
-            if not state['code_references']:
-                print("   (none found)")
-
-            # Datasets
-            datasets = analysis.get('datasets', [])
-            print(f"\n📊 Datasets Identified: {len(datasets)}")
-            if datasets:
-                print(f"   {', '.join(datasets)}")
-            else:
-                print("   (none identified)")
-
-            # Core Contribution
-            print(f"\n💡 Core Contribution:")
-            core = analysis.get('core_contribution', 'N/A')
-            if core:
-                # Wrap text at 70 chars
-                import textwrap
-                wrapped = textwrap.fill(core, width=74, initial_indent="   ", subsequent_indent="   ")
-                print(wrapped)
-            else:
-                print("   (not extracted)")
-
-            # Results to Reproduce
-            metrics = state["paper_results"].get("metrics", [])
-            print(f"\n🎯 Results to Reproduce: {len(metrics)} metric(s)")
-            if metrics:
-                for m in metrics[:5]:  # Show first 5
-                    dataset = m.get('dataset', 'Unknown')
-                    metric = m.get('metric', 'Unknown')
-                    value = m.get('value', 'Unknown')
-                    print(f"   - {dataset}: {metric} = {value}")
-                if len(metrics) > 5:
-                    print(f"   ... and {len(metrics) - 5} more")
-            else:
-                # Show summary if no structured metrics
-                summary = state["paper_results"].get("summary", "")
-                if summary:
-                    print("   Summary from paper:")
-                    summary_lines = summary.split('\n')[:3]  # First 3 lines
-                    for line in summary_lines:
-                        if line.strip():
-                            print(f"   {line.strip()[:74]}")
-                else:
-                    print("   (no metrics extracted)")
-
-            # Implementation Details
-            impl_details = analysis.get('implementation_details', '')
-            if impl_details:
-                print(f"\n🔧 Implementation Details:")
-                impl_lines = impl_details.split('\n')[:2]  # First 2 lines
-                for line in impl_lines:
-                    if line.strip():
-                        print(f"   {line.strip()[:74]}")
-
-            print("\n" + "="*80 + "\n")
-
-            # Try Papers with Code API as fallback if no repos found
+            # Try Papers with Code API as fallback
             if not state["code_references"] and state.get("paper_title"):
-                print("🔍 No repos in paper, trying Papers with Code API...")
-                try:
-                    import requests
-                    # Papers with Code API - do it ourselves
-                    base_url = "https://paperswithcode.com/api/v1/papers/"
-                    search_url = f"{base_url}?title={requests.utils.quote(state['paper_title'])}"
-                    response = requests.get(search_url, timeout=10)
-
-                    if response.status_code == 200:
-                        data = response.json()
-                        if data.get("results"):
-                            paper = data["results"][0]
-                            paper_id = paper.get("id")
-
-                            # Get implementations
-                            impl_url = f"https://paperswithcode.com/api/v1/papers/{paper_id}/repositories/"
-                            impl_response = requests.get(impl_url, timeout=10)
-
-                            if impl_response.status_code == 200:
-                                impl_data = impl_response.json()
-                                implementations = impl_data.get("results", [])
-
-                                # Get official repos first, otherwise any repo
-                                repos = [impl["url"] for impl in implementations if impl.get("url") and impl.get("is_official")]
-                                if not repos:
-                                    repos = [impl["url"] for impl in implementations if impl.get("url")]
-
-                                if repos:
-                                    state["code_references"] = repos
-                                    print(f"✅ Found {len(repos)} implementation(s) from Papers with Code")
-                except Exception as e:
-                    print(f"⚠️  Papers with Code API failed: {str(e)[:50]}")
+                self._try_papers_with_code(state)
         else:
             state["code_references"] = []
             state["paper_results"] = {}
@@ -396,253 +241,308 @@ class PaperReproductionOrchestrator:
 
         return state
 
-    def _search_code_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """REMOVED: Generic GitHub search is unreliable and finds wrong repos."""
-        print("🔍 Skipping generic GitHub search (relies on paper extraction only)")
+    def _print_analysis_summary(self, state, analysis):
+        """Print detailed analysis results."""
+        import textwrap
 
-        # We already extracted repos in _analyze_paper_node using:
-        # 1. Regex extraction from paper text
-        # 2. Papers with Code API fallback
-        # No need for generic GitHub search - it finds wrong repos!
+        print("\n" + "="*80)
+        print("📊 UNIFIED ANALYZER FINDINGS")
+        print("="*80)
 
-        state["existing_repos"] = []
-        state["selected_repo"] = {}
-        state["repo_quality_score"] = 0.0
+        # GitHub Repositories
+        print(f"\n📚 GitHub Repositories Found: {len(state['code_references'])}")
+        for i, repo in enumerate(state['code_references'], 1):
+            print(f"   {i}. {repo}")
+        if not state['code_references']:
+            print("   (none found)")
 
-        return state
+        # Datasets
+        datasets = analysis.get('datasets', [])
+        print(f"\n📊 Datasets Identified: {len(datasets)}")
+        if datasets:
+            print(f"   {', '.join(datasets)}")
+        else:
+            print("   (none identified)")
 
-    def _decide_path_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Decide whether to use existing code or create new implementation."""
+        # Core Contribution
+        print(f"\n💡 Core Contribution:")
+        core = analysis.get('core_contribution', 'N/A')
+        if core:
+            wrapped = textwrap.fill(core, width=74, initial_indent="   ", subsequent_indent="   ")
+            print(wrapped)
+        else:
+            print("   (not extracted)")
+
+        # Results to Reproduce
+        metrics = state["paper_results"].get("metrics", [])
+        print(f"\n🎯 Results to Reproduce: {len(metrics)} metric(s)")
+        if metrics:
+            for m in metrics[:5]:
+                dataset = m.get('dataset', 'Unknown')
+                metric = m.get('metric', 'Unknown')
+                value = m.get('value', 'Unknown')
+                print(f"   - {dataset}: {metric} = {value}")
+            if len(metrics) > 5:
+                print(f"   ... and {len(metrics) - 5} more")
+        else:
+            summary = state["paper_results"].get("summary", "")
+            if summary:
+                print("   Summary from paper:")
+                for line in summary.split('\n')[:3]:
+                    if line.strip():
+                        print(f"   {line.strip()[:74]}")
+            else:
+                print("   (no metrics extracted)")
+
+        print("\n" + "="*80 + "\n")
+
+    def _try_papers_with_code(self, state):
+        """Try Papers with Code API as fallback for finding implementations."""
+        print("🔍 No repos in paper, trying Papers with Code API...")
+        try:
+            import requests
+            base_url = "https://paperswithcode.com/api/v1/papers/"
+            search_url = f"{base_url}?title={requests.utils.quote(state['paper_title'])}"
+            response = requests.get(search_url, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("results"):
+                    paper = data["results"][0]
+                    paper_id = paper.get("id")
+
+                    impl_url = f"https://paperswithcode.com/api/v1/papers/{paper_id}/repositories/"
+                    impl_response = requests.get(impl_url, timeout=10)
+
+                    if impl_response.status_code == 200:
+                        impl_data = impl_response.json()
+                        implementations = impl_data.get("results", [])
+
+                        repos = [impl["url"] for impl in implementations if impl.get("url") and impl.get("is_official")]
+                        if not repos:
+                            repos = [impl["url"] for impl in implementations if impl.get("url")]
+
+                        if repos:
+                            state["code_references"] = repos
+                            print(f"✅ Found {len(repos)} implementation(s) from Papers with Code")
+        except Exception as e:
+            print(f"⚠️  Papers with Code API failed: {str(e)[:50]}")
+
+    def _select_best_repo(self, repos: list, paper_title: str, paper_abstract: str = "") -> str:
+        """Use LLM to select the best repository for the paper."""
+        if len(repos) == 1:
+            return repos[0]
+
+        prompt = f"""Given this paper and list of GitHub repositories, select the ONE repository that is most likely the official implementation.
+
+Paper Title: {paper_title}
+
+Abstract: {paper_abstract[:500] if paper_abstract else 'N/A'}
+
+Repositories found:
+{chr(10).join(f'{i+1}. {repo}' for i, repo in enumerate(repos))}
+
+Reply with ONLY the number (1, 2, 3, etc.) of the best repository. Choose the one that:
+- Has a name matching the paper's method/acronym
+- Is from the paper's authors (if identifiable)
+- Is NOT a general library like huggingface/transformers
+
+Answer (number only):"""
+
+        try:
+            import re
+            response = self.llm.invoke(prompt)
+            match = re.search(r'\d+', response.content)
+            if match:
+                idx = int(match.group()) - 1
+                if 0 <= idx < len(repos):
+                    print(f"🤖 LLM selected repo #{idx+1}: {repos[idx]}")
+                    return repos[idx]
+        except Exception as e:
+            print(f"⚠️ LLM repo selection failed: {e}")
+
+        return repos[0]
+
+    def _decide_and_clone_node(self, state: PaperReproductionState) -> PaperReproductionState:
+        """Decide on implementation path and clone repository if found."""
         print("🤔 Deciding on implementation path...")
 
-        import os
-        import shutil
-        import subprocess
-
-        # Priority 1: Code references from paper itself
+        # Check for code references from paper
         if state["code_references"] and isinstance(state["code_references"], list):
-            # Filter out "No code repository URLs found" messages
             valid_refs = [ref for ref in state["code_references"]
                          if ref.startswith("http") and "github" in ref.lower()]
-            if valid_refs:
-                state["next_step"] = "use_existing"
-                state["selected_repo"] = {"url": valid_refs[0], "source": "paper"}
-                state["messages"].append(f"📥 Using official implementation: {valid_refs[0]}")
-                print(f"✅ Found official implementation: {valid_refs[0]}")
 
-                # Clone the repository now
-                repo_url = valid_refs[0]
+            if valid_refs:
+                # Use LLM to select best repo if multiple found
+                paper_abstract = state.get("paper_metadata", {}).get("abstract", "")
+                selected_url = self._select_best_repo(valid_refs, state.get("paper_title", ""), paper_abstract)
+
+                state["selected_repo"] = {"url": selected_url, "source": "paper"}
+                state["messages"].append(f"📥 Using official implementation: {selected_url}")
+                print(f"✅ Found official implementation: {selected_url}")
+
+                # Clone the repository
                 code_path = "./cloned_repo"
                 repo_marker = os.path.join(code_path, ".repo_url")
 
-                # Check if we need to clone
                 need_clone = True
                 if os.path.exists(code_path):
-                    # Check if it's the same repo
                     if os.path.exists(repo_marker):
                         try:
                             with open(repo_marker, 'r') as f:
                                 existing_url = f.read().strip()
-                            if existing_url == repo_url:
-                                print(f"✅ Repository already cloned: {repo_url}")
+                            if existing_url == selected_url:
+                                print(f"✅ Repository already cloned: {selected_url}")
                                 need_clone = False
                             else:
-                                print(f"🔄 Different repo detected (was: {existing_url})")
-                                print(f"🗑️  Removing old repository...")
+                                print(f"🔄 Different repo detected, removing old...")
                                 shutil.rmtree(code_path)
                         except Exception as e:
                             print(f"⚠️  Could not read repo marker: {e}")
-                            print(f"🗑️  Removing directory to be safe...")
                             shutil.rmtree(code_path)
                     else:
                         print(f"🗑️  No repo marker found, removing directory...")
                         shutil.rmtree(code_path)
 
                 if need_clone:
-                    print(f"📥 Cloning repository from {repo_url}...")
-                    # Clone repo ourselves (no @tool issues)
+                    print(f"📥 Cloning repository from {selected_url}...")
                     try:
                         result = subprocess.run(
-                            ["git", "clone", repo_url, code_path],
+                            ["git", "clone", selected_url, code_path],
                             capture_output=True,
                             text=True,
                             timeout=300
                         )
                         if result.returncode == 0:
-                            clone_result = f"Successfully cloned repository to {code_path}"
-                        else:
-                            clone_result = f"Clone failed: {result.stderr}"
-                    except Exception as e:
-                        clone_result = f"Error cloning repository: {str(e)}"
-
-                    print(clone_result)
-
-                    if "Successfully cloned" in clone_result:
-                        # Store repo URL marker
-                        try:
+                            print(f"✅ Successfully cloned repository to {code_path}")
+                            # Store repo URL marker
                             with open(repo_marker, 'w') as f:
-                                f.write(repo_url)
-                        except Exception as e:
-                            print(f"⚠️  Could not write repo marker: {e}")
-                        state["implementation_path"] = code_path
-                    else:
-                        print(f"⚠️  Clone failed: {clone_result}")
-                        state["messages"].append("Clone failed but continuing")
+                                f.write(selected_url)
+                            state["implementation_path"] = code_path
+                        else:
+                            print(f"⚠️  Clone failed: {result.stderr}")
+                            state["messages"].append("Clone failed")
+                            state["final_status"] = "Failed: Could not clone repository"
+                            return state
+                    except Exception as e:
+                        print(f"⚠️  Clone error: {str(e)}")
+                        state["final_status"] = f"Failed: Clone error - {str(e)}"
+                        return state
                 else:
                     state["implementation_path"] = code_path
 
                 return state
 
-        # Priority 2: High-quality existing repo from search
-        if state["repo_quality_score"] > 0.7 and state.get("selected_repo", {}).get("url"):
-            state["next_step"] = "use_existing"
-            state["messages"].append(f"📥 Using high-quality implementation: {state['selected_repo'].get('url', 'unknown')}")
-            print(f"✅ Using existing repo: {state['selected_repo'].get('url', 'unknown')}")
-            return state
-
-        # Priority 3: Any repo from search with reasonable quality
-        if state.get("existing_repos") and len(state["existing_repos"]) > 0:
-            repo = state["existing_repos"][0]
-            if isinstance(repo, dict) and repo.get("url"):
-                state["next_step"] = "use_existing"
-                state["selected_repo"] = repo
-                state["messages"].append(f"📥 Using found implementation: {repo['url']}")
-                print(f"✅ Using found repo: {repo['url']}")
-                return state
-
-        # Last resort: Would need to create new implementation
-        # But for now, we'll stop here as this requires more complex code generation
-        state["next_step"] = "failed"
+        # No implementation found
         state["final_status"] = "Failed: No implementation found"
         state["messages"].append("❌ No implementation found")
         print("❌ No existing implementation found")
-        print("❌ STOPPING workflow - automatic code generation not yet supported")
 
         return state
 
-    def _setup_environment_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Setup execution environment - install dependencies."""
-        print("🔧 Setting up environment...")
+    def _unified_reproduction_node(self, state: PaperReproductionState) -> PaperReproductionState:
+        """Run unified reproduction workflow."""
+        print("🚀 Starting unified reproduction workflow...")
 
         code_path = state.get("implementation_path") or "./cloned_repo"
 
-        # Try up to 3 times
-        max_retries = 3
-        setup_results = None
+        # Build comprehensive context from paper analysis
+        paper_context_parts = []
 
-        for attempt in range(1, max_retries + 1):
-            if attempt > 1:
-                print(f"🔄 Retry attempt {attempt}/{max_retries}")
+        if state.get("agent_contexts", {}).get("paper_analyzer"):
+            paper_context_parts.append(state["agent_contexts"]["paper_analyzer"])
 
-            setup_results = self.env_setup.setup_environment(code_path)
-
-            if setup_results.get("success"):
-                state["env_setup_results"] = setup_results
-                state["dependencies_installed"] = True
-                state["messages"].append(f"✅ Dependencies installed successfully")
-                print(f"✅ Dependencies installed")
-                return state
-            else:
-                print(f"⚠️  Attempt {attempt} failed: {setup_results.get('errors', [])[:200]}")
-                if attempt < max_retries:
-                    import time
-                    time.sleep(2)  # Brief delay before retry
-
-        # All attempts failed - STOP the workflow
-        state["env_setup_results"] = setup_results
-        state["dependencies_installed"] = False
-        state["messages"].append(f"❌ Environment setup failed after {max_retries} attempts")
-        state["final_status"] = "Failed: Could not install dependencies"
-        print(f"❌ Environment setup failed after {max_retries} attempts")
-        print(f"❌ STOPPING workflow - cannot continue without dependencies")
-
-        return state
-
-    def _prepare_datasets_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Prepare datasets for experiments."""
-        print("📦 Preparing datasets...")
-
-        code_path = state.get("implementation_path") or "./cloned_repo"
-        paper_datasets = state.get("experimental_setup", {}).get("datasets", [])
-
-        # Get context from previous agents
-        paper_context = state.get("agent_contexts", {}).get("paper_analyzer", "")
-
-        dataset_results = self.dataset_manager.prepare_datasets(
-            code_path, paper_datasets, agent_context=paper_context
-        )
-
-        state["dataset_results"] = dataset_results
-        state["datasets_ready"] = dataset_results.get("datasets_identified", False)
-
-        if dataset_results.get("datasets_downloaded"):
-            state["messages"].append("✅ Datasets prepared successfully")
-            print(f"✅ Datasets ready")
-        else:
-            # Don't add a message - it's handled in verification
-            print(f"⚠️  Datasets not fully prepared")
-
-        return state
-
-    def _run_experiments_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Run experiments and capture outputs."""
-        print("🧪 Running experiments...")
-
-        code_path = state.get("implementation_path") or "./cloned_repo"
-
-        # Build comprehensive context for experiment runner
-        paper_results = state.get("paper_results", {})
         datasets = state.get("experimental_setup", {}).get("datasets", [])
+        if datasets:
+            paper_context_parts.append(f"\nDatasets mentioned in paper: {', '.join(datasets)}")
 
-        # Create detailed context with results to reproduce
-        detailed_context = state.get("agent_contexts", {}).get("paper_analyzer", "")
-
-        # Add detailed results if available
+        paper_results = state.get("paper_results", {})
         if paper_results:
-            detailed_context += "\n\nResults to Reproduce:\n"
+            paper_context_parts.append("\n\nResults to Reproduce:")
             if isinstance(paper_results, dict):
-                # From unified analyzer
                 metrics = paper_results.get("metrics", [])
                 for m in metrics:
-                    detailed_context += f"  - {m.get('dataset', 'Unknown')}: {m.get('metric', 'Unknown')} = {m.get('value', 'Unknown')}\n"
-
-                # Add summary if no structured metrics
+                    paper_context_parts.append(
+                        f"  - {m.get('dataset', 'Unknown')}: {m.get('metric', 'Unknown')} = {m.get('value', 'Unknown')}"
+                    )
                 if not metrics and "summary" in paper_results:
-                    detailed_context += f"{paper_results['summary']}\n"
+                    paper_context_parts.append(f"\n{paper_results['summary']}")
 
-        # Add dataset info
-        if datasets:
-            detailed_context += f"\nDatasets mentioned: {', '.join(datasets)}\n"
+        impl_details = state.get("experimental_setup", {}).get("implementation_details", "")
+        if impl_details:
+            paper_context_parts.append(f"\n\nImplementation Details:\n{impl_details[:500]}")
 
-        experiment_results = self.experiment_runner.run_experiments(
-            code_path, paper_experiments=None, agent_context=detailed_context
-        )
+        paper_context = "\n".join(paper_context_parts)
 
-        state["experiment_results"] = experiment_results
-        state["experiments_completed"] = experiment_results.get("execution_successful", False)
+        # Run unified reproduction
+        result = self.unified_reproducer.reproduce(code_path, paper_context)
 
-        # Store experiment runner context for next agents
-        exp_context = f"Ran: {experiment_results.get('executed_command', 'unknown command')}"
-        if experiment_results.get("execution_successful"):
-            exp_context += " (succeeded)"
+        # Update state with results
+        state["env_setup_results"] = {
+            "success": result["setup_successful"],
+            "report": result["report"]
+        }
+        state["dependencies_installed"] = result["dependencies_installed"]
+
+        state["dataset_results"] = {
+            "datasets_identified": result["data_attempted"],
+            "datasets_downloaded": result["data_successful"],
+            "dataset_locations": [result["data_location"]] if result["data_location"] else []
+        }
+        state["datasets_ready"] = result["data_successful"]
+
+        state["experiment_results"] = {
+            "execution_successful": result["main_experiment_successful"],
+            "sanity_check_passed": result["sanity_check_passed"],
+            "output": result["experiment_output"],
+            "executed_command": ", ".join(result["executed_commands"]) if result["executed_commands"] else "",
+            "errors": result["errors"],
+            "experiments_tried": result.get("experiments_tried", []),
+            "experiments_succeeded": result.get("experiments_succeeded", []),
+            "partial_success": result.get("partial_success", False)
+        }
+        state["experiments_completed"] = result["main_experiment_successful"] or result.get("partial_success", False)
+
+        # Store context
+        state["agent_contexts"]["unified_reproducer"] = result["report"]
+
+        # Add messages
+        if result["setup_successful"]:
+            state["messages"].append("✅ Environment setup successful")
+            print("✅ Environment setup successful")
         else:
-            exp_context += " (failed)"
-        state["agent_contexts"]["experiment_runner"] = exp_context
+            state["messages"].append("❌ Environment setup failed")
+            print("❌ Environment setup failed")
 
-        if experiment_results.get("execution_successful"):
+        if result["data_successful"]:
+            state["messages"].append("✅ Datasets prepared successfully")
+            print("✅ Datasets prepared")
+        elif result["data_manual_steps"]:
+            state["messages"].append("⚠️  Manual dataset steps required")
+            print("⚠️  Manual dataset steps required")
+
+        if result["main_experiment_successful"]:
             state["messages"].append("✅ Experiments executed successfully")
-            print(f"✅ Experiments completed")
-            if experiment_results.get("used_readme"):
-                print(f"   ✅ Used README command!")
+            print("✅ Experiments executed successfully")
+        elif result["sanity_check_passed"]:
+            state["messages"].append("⚠️  Sanity check passed but main experiment failed")
+            print("⚠️  Sanity check passed but main experiment failed")
         else:
-            # Don't add a message - it's handled in verification
-            print(f"⚠️  Execution issues: {experiment_results.get('errors', [])}")
+            state["messages"].append("❌ Experiments failed")
+            print("❌ Experiments failed")
+
+        # Print summary
+        print(f"\n📊 Unified Reproduction Summary:")
+        print(f"   READMEs consulted: {', '.join(result['readmes_consulted']) if result['readmes_consulted'] else 'None'}")
+        print(f"   Setup: {'✅' if result['setup_successful'] else '❌'}")
+        print(f"   Data: {'✅' if result['data_successful'] else '⚠️'}")
+        print(f"   Experiments: {'✅' if result['main_experiment_successful'] else '❌'}")
 
         return state
 
-    def _extract_metrics_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Extract and compare metrics from experiment outputs."""
-        print("📊 Extracting metrics...")
+    def _extract_and_verify_node(self, state: PaperReproductionState) -> PaperReproductionState:
+        """Extract metrics and verify results against paper claims."""
+        print("📊 Extracting metrics and verifying results...")
 
         experiment_output = state.get("experiment_results", {}).get("output", "")
         paper_results = state.get("paper_results", {})
@@ -651,8 +551,6 @@ class PaperReproductionOrchestrator:
         extracted = self.metrics_extractor.extract_metrics(experiment_output, paper_results)
 
         # Transform paper_results to flat dictionary format for comparison
-        # unified_paper_analyzer returns: {"results_to_reproduce": {"metrics": [...]}}
-        # compare_metrics expects: {"metric_name": value}
         expected_metrics_dict = {}
         if isinstance(paper_results, dict):
             results_to_repro = paper_results.get("results_to_reproduce", {})
@@ -665,7 +563,6 @@ class PaperReproductionOrchestrator:
                             metric = m.get("metric", "").replace(" ", "_").replace("-", "_")
                             value = m.get("value", "")
 
-                            # Create key like "MNLI_Accuracy" or just "Accuracy" if no dataset
                             if dataset and metric:
                                 key = f"{dataset}_{metric}"
                             elif metric:
@@ -675,55 +572,11 @@ class PaperReproductionOrchestrator:
 
                             expected_metrics_dict[key] = value
 
-        # Compare with paper results (using transformed flat dictionary)
+        # Compare with paper results
         comparison = self.metrics_extractor.compare_metrics(extracted, expected_metrics_dict)
 
         state["extracted_metrics"] = extracted
         state["metrics_comparison"] = comparison
-
-        if comparison.get("overall_match"):
-            state["messages"].append(f"✅ Metrics match paper results ({comparison.get('match_rate', 'N/A')})")
-            print(f"✅ Metrics match: {comparison.get('match_rate', 'N/A')}")
-        else:
-            # Don't add a message - it's handled in verification
-            print(f"⚠️  Metrics mismatch")
-
-        return state
-
-    def _reproduce_code_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Reproduce code from scratch using CodeReproducerAgent."""
-        print("💻 Reproducing code from paper...")
-
-        # Create implementation plan
-        paper_analysis = {
-            "paper_metadata": state["paper_metadata"],
-            "algorithms": state["algorithms"],
-            "experimental_setup": state["experimental_setup"],
-        }
-
-        plan = self.code_reproducer.create_implementation_plan(paper_analysis)
-
-        # Implement the algorithm
-        algorithm_desc = "\n".join(state["algorithms"]) if state["algorithms"] else "No explicit algorithm found"
-
-        result = self.code_reproducer.implement_algorithm(
-            algorithm_desc,
-            output_dir="./implementation"
-        )
-
-        state["implementation_path"] = result["output_dir"]
-        state["code_created"] = True
-        state["messages"].append("✅ Code implementation created")
-
-        return state
-
-    def _verify_code_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Verify results by checking metrics comparison."""
-        print("✅ Verifying results...")
-
-        # Use metrics comparison from extract_metrics_node
-        metrics_comparison = state.get("metrics_comparison", {})
-        experiment_results = state.get("experiment_results", {})
 
         # Build verification report
         verification_report = []
@@ -733,91 +586,80 @@ class PaperReproductionOrchestrator:
         verification_report.append(f"- Experiments Completed: {'Yes' if state.get('experiments_completed') else 'No'}")
 
         verification_report.append("\n## Metrics Comparison")
-        if metrics_comparison.get("matches"):
+        if comparison.get("matches"):
             verification_report.append("### Matching Metrics:")
-            for match in metrics_comparison["matches"]:
+            for match in comparison["matches"]:
                 verification_report.append(f"  - {match['metric']}: {match['actual']} (expected: {match['expected']}, diff: {match['diff']})")
 
-        if metrics_comparison.get("mismatches"):
+        if comparison.get("mismatches"):
             verification_report.append("### Mismatched Metrics:")
-            for mismatch in metrics_comparison["mismatches"]:
+            for mismatch in comparison["mismatches"]:
                 verification_report.append(f"  - {mismatch['metric']}: {mismatch['actual']} (expected: {mismatch['expected']}, diff: {mismatch['diff']})")
 
-        if metrics_comparison.get("missing"):
+        if comparison.get("missing"):
             verification_report.append("### Missing Metrics:")
-            for missing in metrics_comparison["missing"]:
+            for missing in comparison["missing"]:
                 verification_report.append(f"  - {missing}")
 
         report_text = "\n".join(verification_report)
 
-        # Determine if results match
-        results_match = metrics_comparison.get("overall_match", False)
-        experiments_completed = state.get("experiments_completed", False)
+        # Determine success level based on experiments (NEW LOGIC)
+        # Success criteria: ALL experiments must succeed (within 5% error)
+        # Partial: Some experiments succeeded (report portion X/Y)
+        # Failure: All experiments failed OR prerequisites failed
 
-        # More nuanced success criteria
-        if experiments_completed:
-            # Experiments ran - check if metrics match
-            if results_match:
-                success_level = "full"  # Full success
-                status_msg = "✅ Verification: Experiments completed and results match paper"
-            else:
-                success_level = "partial"  # Partial - experiments ran but metrics don't match
-                status_msg = "⚠️ Verification: Experiments completed but results don't match paper"
-                report_text += "\n\n⚠️ Experiments completed but results differ from paper claims."
-        else:
-            # Experiments didn't run
+        experiments_tried = state.get("experiment_results", {}).get("experiments_tried", [])
+        experiments_succeeded = state.get("experiment_results", {}).get("experiments_succeeded", [])
+        dependencies_installed = state.get("dependencies_installed", False)
+
+        # Check prerequisites first
+        if not dependencies_installed:
+            success_level = "failed"
+            results_match = False
+            status_msg = "❌ Verification: Environment setup failed"
+        elif not experiments_tried:
+            # No experiments attempted
             sanity_check_passed = state.get("experiment_results", {}).get("sanity_check_passed", False)
-
             if sanity_check_passed:
-                # Sanity check passed but main experiment didn't run
                 success_level = "minimal"
-                results_match = False  # Mark as not matching since we didn't reproduce
-                status_msg = "⚠️ Verification: Only sanity check completed, main experiment did not run"
-                report_text += "\n\n⚠️ Only sanity check completed. Main experiments were not executed."
-            elif state.get("selected_repo") and state.get("dependencies_installed"):
-                # At least we found and set up the code
-                success_level = "setup_only"
-                results_match = False  # Definitely not matching - no experiments ran
-                status_msg = "⚠️ Verification: Repository found and environment set up, but no experiments ran"
-                report_text += "\n\n⚠️ Experiments did not run. Repository was found and environment was set up."
+                results_match = False
+                status_msg = "⚠️ Verification: Only sanity check completed"
             else:
-                # Complete failure
+                success_level = "setup_only"
+                results_match = False
+                status_msg = "⚠️ Verification: Setup complete but no experiments run"
+        else:
+            # Calculate overall success based on experiments
+            total_experiments = len(experiments_tried)
+            succeeded_count = len(experiments_succeeded)
+            success_portion = f"{succeeded_count}/{total_experiments}"
+
+            if succeeded_count == total_experiments:
+                # ALL experiments succeeded (within 5% error)
+                success_level = "full"
+                results_match = True
+                status_msg = f"✅ Verification: All {total_experiments} experiment(s) succeeded - results match paper (within 5%)"
+            elif succeeded_count > 0:
+                # PARTIAL success (some experiments succeeded)
+                success_level = "partial"
+                results_match = False
+                status_msg = f"⚠️ Verification: Partial reproduction - {success_portion} experiments succeeded ({', '.join(experiments_succeeded)})"
+            else:
+                # ALL experiments failed
                 success_level = "failed"
                 results_match = False
-                status_msg = "❌ Verification: Reproduction failed"
-                report_text += "\n\n❌ Reproduction failed - could not run experiments."
+                status_msg = f"❌ Verification: All {total_experiments} experiment(s) failed"
 
         state["verification_results"] = {
             "report": report_text,
             "results_match_paper": results_match,
             "success_level": success_level,
-            "discrepancies": metrics_comparison.get("mismatches", [])
+            "discrepancies": comparison.get("mismatches", [])
         }
         state["results_match"] = results_match
-        state["errors_found"] = [str(m) for m in metrics_comparison.get("mismatches", [])]
 
         print(f"\n📝 Verification Report:\n{report_text}\n")
         state["messages"].append(status_msg)
-
-        return state
-
-    def _debug_code_node(self, state: PaperReproductionState) -> PaperReproductionState:
-        """Debug and fix code using CodeDebuggerAgent."""
-        print("🔧 Debugging and fixing code...")
-
-        state["debug_attempts"] = state.get("debug_attempts", 0) + 1
-
-        code_path = state.get("implementation_path", "./code")
-
-        error_info = {
-            "errors": state["errors_found"],
-            "verification_report": state["verification_results"].get("report", ""),
-        }
-
-        debug_result = self.code_debugger.debug_and_fix(code_path, error_info)
-
-        state["fixes_applied"] = debug_result.get("fixes_applied", [])
-        state["messages"].append(f"Debug attempt {state['debug_attempts']}: {len(state['fixes_applied'])} fixes applied")
 
         return state
 
@@ -825,16 +667,25 @@ class PaperReproductionOrchestrator:
         """Generate final report."""
         print("📊 Generating final report...")
 
-        # Determine final status based on verification results
+        # Determine final status
         success_level = state.get("verification_results", {}).get("success_level", "failed")
+        experiments_tried = state.get("experiment_results", {}).get("experiments_tried", [])
+        experiments_succeeded = state.get("experiment_results", {}).get("experiments_succeeded", [])
+
+        # Calculate overall portion
+        if experiments_tried:
+            success_portion = f"{len(experiments_succeeded)}/{len(experiments_tried)}"
+        else:
+            success_portion = "0/0"
+
         status_map = {
-            "full": "✅ Complete - Results Match Paper",
-            "partial": "⚠️ Partial - Experiments Ran, Results Differ",
+            "full": "✅ Complete - All Experiments Succeeded (Results Match Paper)",
+            "partial": f"⚠️ Partial - {success_portion} Experiments Reproduced ({', '.join(experiments_succeeded)})" if experiments_succeeded else f"⚠️ Partial - {success_portion} Experiments Succeeded",
             "minimal": "⚠️ Minimal - Only Sanity Check Passed",
-            "setup_only": "⚠️ Setup Only - No Experiments Ran",
-            "failed": "❌ Failed"
+            "setup_only": "⚠️ Setup Only - No Experiments Run",
+            "failed": "❌ Failed - Prerequisites or All Experiments Failed"
         }
-        state["final_status"] = status_map.get(success_level, "❌ Failed")
+        state["final_status"] = state.get("final_status") or status_map.get(success_level, "❌ Failed")
 
         # Get selected repo info
         selected_repo_info = "None"
@@ -843,37 +694,31 @@ class PaperReproductionOrchestrator:
             if isinstance(repo, dict):
                 selected_repo_info = repo.get("url") or repo.get("full_name", "Unknown")
 
-        # Count total repos found (from both code_references and existing_repos)
-        total_repos_found = 0
-        # Count code references from paper
+        # Count repos found
         code_refs_count = len([r for r in state.get('code_references', []) if isinstance(r, str) and r.startswith('http')])
-        # Count repos from search
-        existing_repos_count = len(state.get('existing_repos', []))
-        total_repos_found = code_refs_count + existing_repos_count
 
-        # Deduplicate and filter messages - only show unique, important messages
-        all_messages = state.get('messages', [])
+        # Deduplicate messages
         seen = set()
         unique_messages = []
+        skip_phrases = ["continuing anyway", "will attempt anyway", "had issues - continuing"]
 
-        # Filter out noisy/redundant messages
-        skip_phrases = [
-            "continuing anyway",
-            "will attempt execution anyway",
-            "will attempt anyway",
-            "had issues - continuing",
-            "incomplete - will"
-        ]
-
-        for msg in all_messages:
-            # Skip if we've seen this message
+        for msg in state.get('messages', []):
             if msg in seen:
                 continue
-            # Skip if it's a noisy message
             if any(phrase in msg.lower() for phrase in skip_phrases):
                 continue
             seen.add(msg)
             unique_messages.append(msg)
+
+        # Build experiment section
+        experiment_section = ""
+        if experiments_tried:
+            experiment_section = f"""
+## Experiments
+- Attempted: {', '.join(experiments_tried)}
+- Succeeded: {', '.join(experiments_succeeded) if experiments_succeeded else 'None'}
+- Success Rate: {success_portion} ({len(experiments_succeeded)/len(experiments_tried)*100:.0f}%)
+"""
 
         report = f"""
 # Paper Reproduction Report
@@ -884,16 +729,12 @@ class PaperReproductionOrchestrator:
 - Code References Found: {code_refs_count}
 
 ## Implementation
-- Path: {state.get('next_step', 'N/A')}
 - Selected Repository: {selected_repo_info}
-- Code Created: {'Yes' if state.get('code_created') else 'No'}
-- Total Repos Found: {total_repos_found} (from paper: {code_refs_count}, from search: {existing_repos_count})
-
+- Implementation Path: {state.get('implementation_path', 'N/A')}
+{experiment_section}
 ## Verification
 - Results Match Paper: {'Yes' if state.get('results_match') else 'No'}
-- Errors Found: {len(state.get('errors_found', []))}
-- Debug Attempts: {state.get('debug_attempts', 0)}
-- Fixes Applied: {len(state.get('fixes_applied', []))}
+- Success Level: {success_level}
 
 ## Status
 {state.get('final_status', 'Complete')}
@@ -906,38 +747,29 @@ class PaperReproductionOrchestrator:
 
         return state
 
-    def _route_after_search(self, state: PaperReproductionState) -> Literal["use_existing", "create_new", "failed"]:
-        """Route after code search."""
-        return state.get("next_step", "create_new")
-
-    def _route_after_setup(self, state: PaperReproductionState) -> Literal["continue", "failed"]:
-        """Route after environment setup - stop if failed."""
-        if state.get("dependencies_installed"):
+    def _route_after_clone(self, state: PaperReproductionState) -> Literal["continue", "failed"]:
+        """Route after cloning repository."""
+        if state.get("implementation_path"):
             return "continue"
-        else:
+        return "failed"
+
+    def _route_after_reproduction(self, state: PaperReproductionState) -> Literal["continue", "failed"]:
+        """Route after unified reproduction."""
+        setup_success = state.get("dependencies_installed", False)
+        experiments_completed = state.get("experiments_completed", False)
+        sanity_check_passed = state.get("experiment_results", {}).get("sanity_check_passed", False)
+
+        if not setup_success:
             print("🛑 Routing to report generation due to setup failure")
+            state["final_status"] = "Failed: Environment setup failed"
             return "failed"
 
-    def _route_after_verification(self, state: PaperReproductionState) -> Literal["success", "needs_debug"]:
-        """Route after verification."""
-        # If we successfully found and cloned the repo, that's a success
-        if state.get("results_match"):
-            print("✅ Verification successful - skipping debug")
-            return "success"
-        # If there are no actual errors to debug, skip debugging
-        elif not state.get("errors_found") or len(state.get("errors_found", [])) == 0:
-            print("⚠️  No errors to debug - skipping debug phase")
-            return "success"
-        else:
-            return "needs_debug"
+        if experiments_completed or sanity_check_passed:
+            print("✅ Routing to metrics extraction")
+            return "continue"
 
-    def _route_after_debug(self, state: PaperReproductionState) -> Literal["retry_verify", "give_up"]:
-        """Route after debugging."""
-        max_attempts = 3
-        if state.get("debug_attempts", 0) >= max_attempts:
-            return "give_up"
-        else:
-            return "retry_verify"
+        print("⚠️  No experiments run, but continuing to metrics extraction")
+        return "continue"
 
     def run(self, paper_input: str) -> dict:
         """
@@ -950,22 +782,18 @@ class PaperReproductionOrchestrator:
             Final state with results
         """
         print(f"\n{'='*60}")
-        print(f"🚀 Starting Paper Reproduction Workflow")
+        print(f"🚀 Starting Paper Reproduction Workflow (Clean)")
         print(f"{'='*60}\n")
 
         initial_state = {
             "paper_input": paper_input,
             "paper_title": "",
             "paper_metadata": {},
-            "algorithms": [],
             "experimental_setup": {},
             "paper_results": {},
             "code_references": [],
-            "existing_repos": [],
             "selected_repo": {},
-            "repo_quality_score": 0.0,
             "implementation_path": "",
-            "code_created": False,
             "env_setup_results": {},
             "dependencies_installed": False,
             "dataset_results": {},
@@ -976,12 +804,8 @@ class PaperReproductionOrchestrator:
             "metrics_comparison": {},
             "verification_results": {},
             "results_match": False,
-            "errors_found": [],
-            "fixes_applied": [],
-            "debug_attempts": 0,
-            "agent_contexts": {},  # NEW: Agent context history
+            "agent_contexts": {},
             "messages": [],
-            "next_step": "",
             "final_status": "",
             "report": "",
         }

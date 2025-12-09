@@ -131,19 +131,98 @@ def list_directory(dir_path: str = ".", recursive: bool = False, max_depth: int 
         return f"Error listing directory: {str(e)}"
 
 
+def _cleanup_distributed_training():
+    """
+    Safely clean up leftover distributed training processes for current user only.
+    This prevents 'Address already in use' errors from previous failed runs.
+    """
+    import os
+    import getpass
+
+    try:
+        current_user = getpass.getuser()
+
+        # Kill only current user's distributed training processes
+        subprocess.run(
+            f"pkill -u {current_user} -f 'torch.distributed' 2>/dev/null || true",
+            shell=True, capture_output=True, timeout=10
+        )
+
+        # Free common distributed training ports (only for current user)
+        for port in [29500, 29501, 29502]:
+            subprocess.run(
+                f"lsof -ti :{port} -u {current_user} 2>/dev/null | xargs -r kill -9 || true",
+                shell=True, capture_output=True, timeout=10
+            )
+
+        # Set random port for this run
+        import random
+        os.environ['MASTER_PORT'] = str(29500 + random.randint(0, 999))
+
+    except Exception:
+        pass  # Cleanup is best-effort, don't fail if it doesn't work
+
+
 @tool
-def execute_shell_command(command: str, cwd: str = ".", timeout: int = 300) -> Dict[str, Any]:
+def execute_shell_command(command: str, cwd: str = ".", timeout: int = 1800) -> Dict[str, Any]:
     """
     Execute a shell command and capture output.
 
     Args:
         command: Shell command to execute
         cwd: Working directory for command execution
-        timeout: Execution timeout in seconds
+        timeout: Execution timeout in seconds (default: 1800 = 30 minutes)
 
     Returns:
         Dictionary with stdout, stderr, and return code
     """
+    # # Auto-cleanup and setup before distributed training commands
+    # distributed_keywords = ['torch.distributed', 'torchrun', 'nproc_per_node', 'distributed.launch']
+    # training_script_patterns = ['_mnli', '_sst', '_mrpc', '_cola', '_qnli', 'train.sh', 'finetune']
+
+    # is_distributed = any(kw in command for kw in distributed_keywords)
+    # is_training_script = any(pat in command.lower() for pat in training_script_patterns)
+
+    # if is_distributed or is_training_script:
+    #     _cleanup_distributed_training()
+
+    #     # For training scripts with long timeout (>1800s), do a quick test first
+    #     if timeout > 1800:
+    #         print(f"🔍 Running 60-second quick test to catch early errors...")
+
+    #         # Run quick test
+    #         try:
+    #             quick_result = subprocess.run(
+    #                 f"timeout 60 {command}",
+    #                 shell=True,
+    #                 capture_output=True,
+    #                 text=True,
+    #                 timeout=90,  # 90s to allow for timeout command
+    #                 cwd=cwd
+    #             )
+
+    #             output = quick_result.stdout + quick_result.stderr
+
+    #             # Check for fatal errors
+    #             error_patterns = ['cuda error', 'invalid device', 'runtimeerror',
+    #                               'address already in use', 'modulenotfounderror']
+    #             has_error = any(pat in output.lower() for pat in error_patterns)
+
+    #             if has_error:
+    #                 print(f"❌ Quick test detected errors! Check output below.")
+    #                 return {
+    #                     "stdout": quick_result.stdout[-2000:] if len(quick_result.stdout) > 2000 else quick_result.stdout,
+    #                     "stderr": quick_result.stderr[-2000:] if len(quick_result.stderr) > 2000 else quick_result.stderr,
+    #                     "returncode": 1,
+    #                     "success": False,
+    #                     "quick_test": "FAILED - errors detected in first 60 seconds"
+    #                 }
+    #             else:
+    #                 print(f"✅ Quick test passed - running full experiment...")
+
+    #         except Exception as e:
+    #             print(f"⚠️ Quick test error: {e} - proceeding with full run")
+
     try:
         result = subprocess.run(
             command,
@@ -154,9 +233,25 @@ def execute_shell_command(command: str, cwd: str = ".", timeout: int = 300) -> D
             cwd=cwd
         )
 
+        # If command failed, show more output to help diagnose
+        stdout = result.stdout
+        stderr = result.stderr
+        if result.returncode != 0:
+            # Show last 3000 chars of output for failed commands
+            if len(stdout) > 3000:
+                stdout = "...(truncated)...\n" + stdout[-3000:]
+            if len(stderr) > 3000:
+                stderr = "...(truncated)...\n" + stderr[-3000:]
+        else:
+            # For successful commands, truncate more aggressively
+            if len(stdout) > 1500:
+                stdout = stdout[:1500] + "\n...(truncated, command succeeded)..."
+            if len(stderr) > 500:
+                stderr = stderr[:500] + "\n...(truncated)..."
+
         return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": stdout,
+            "stderr": stderr,
             "returncode": result.returncode,
             "success": result.returncode == 0,
         }
@@ -213,7 +308,7 @@ class ExecutePythonScriptInput(BaseModel):
 def execute_python_script(script_path: str, args: Optional[str] = None, timeout: int = 300) -> Dict[str, Any]:
     """
     Execute a Python script and capture output.
-    Automatically uses the virtual environment if it exists in the repo.
+    Automatically uses the virtual environment (venv or conda) if it exists in the repo.
 
     Args:
         script_path: Path to Python script
@@ -224,12 +319,23 @@ def execute_python_script(script_path: str, args: Optional[str] = None, timeout:
         Dictionary with stdout, stderr, and return code
     """
     try:
-        # Check for venv in the script's directory or parent directories
+        # Check for venv/conda in the script's directory or parent directories
         script_dir = Path(script_path).parent.resolve()
-        venv_python = None
+        env_python = None
+        env_type = None
 
-        # Look for venv in current dir and up to 2 parent levels
+        # Look for environments in current dir and up to 2 parent levels
         for check_dir in [script_dir, script_dir.parent, script_dir.parent.parent]:
+            # First check for conda environment (check if conda env was created for this repo)
+            conda_env_name = _generate_conda_env_name(str(check_dir))
+            conda_python = _get_conda_env_python(conda_env_name)
+            if conda_python and Path(conda_python).exists():
+                env_python = conda_python
+                env_type = "conda"
+                print(f"🐍 Using conda environment Python: {env_python} (env: {conda_env_name})")
+                break
+
+            # Then check for venv
             potential_venv = check_dir / "venv"
             if potential_venv.exists():
                 if os.name == 'nt':  # Windows
@@ -238,12 +344,13 @@ def execute_python_script(script_path: str, args: Optional[str] = None, timeout:
                     venv_python_path = potential_venv / "bin" / "python"
 
                 if venv_python_path.exists():
-                    venv_python = str(venv_python_path)
-                    print(f"🐍 Using virtual environment Python: {venv_python}")
+                    env_python = str(venv_python_path)
+                    env_type = "venv"
+                    print(f"🐍 Using virtual environment Python: {env_python}")
                     break
 
-        # Use venv python if found, otherwise system python
-        cmd = [venv_python if venv_python else "python", script_path]
+        # Use env python if found, otherwise system python
+        cmd = [env_python if env_python else "python", script_path]
         if args:
             # Split space-separated args string into list
             cmd.extend(args.split())
@@ -261,7 +368,8 @@ def execute_python_script(script_path: str, args: Optional[str] = None, timeout:
             "stderr": result.stderr,
             "returncode": result.returncode,
             "success": result.returncode == 0,
-            "used_venv": venv_python is not None,
+            "used_env": env_python is not None,
+            "env_type": env_type,  # "conda", "venv", or None
         }
 
     except subprocess.TimeoutExpired:
@@ -325,7 +433,7 @@ def install_dependencies(requirements: List[str], use_pip: bool = True) -> Dict[
 def run_pytest(test_path: str, args: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Run pytest on a test file or directory.
-    Automatically uses the virtual environment if it exists in the repo.
+    Automatically uses the virtual environment (venv or conda) if it exists in the repo.
 
     Args:
         test_path: Path to test file or directory
@@ -335,15 +443,26 @@ def run_pytest(test_path: str, args: Optional[List[str]] = None) -> Dict[str, An
         Test results
     """
     try:
-        # Check for venv in the test path's directory or parent directories
+        # Check for venv/conda in the test path's directory or parent directories
         test_dir = Path(test_path).resolve()
         if test_dir.is_file():
             test_dir = test_dir.parent
 
-        venv_python = None
+        env_python = None
+        env_type = None
 
-        # Look for venv in current dir and up to 2 parent levels
+        # Look for environments in current dir and up to 2 parent levels
         for check_dir in [test_dir, test_dir.parent, test_dir.parent.parent]:
+            # First check for conda environment
+            conda_env_name = _generate_conda_env_name(str(check_dir))
+            conda_python = _get_conda_env_python(conda_env_name)
+            if conda_python and Path(conda_python).exists():
+                env_python = conda_python
+                env_type = "conda"
+                print(f"🐍 Using conda environment Python for pytest: {env_python} (env: {conda_env_name})")
+                break
+
+            # Then check for venv
             potential_venv = check_dir / "venv"
             if potential_venv.exists():
                 if os.name == 'nt':  # Windows
@@ -352,13 +471,14 @@ def run_pytest(test_path: str, args: Optional[List[str]] = None) -> Dict[str, An
                     venv_python_path = potential_venv / "bin" / "python"
 
                 if venv_python_path.exists():
-                    venv_python = str(venv_python_path)
-                    print(f"🐍 Using virtual environment Python for pytest: {venv_python}")
+                    env_python = str(venv_python_path)
+                    env_type = "venv"
+                    print(f"🐍 Using virtual environment Python for pytest: {env_python}")
                     break
 
-        # Use venv python with pytest module if found, otherwise system pytest
-        if venv_python:
-            cmd = [venv_python, "-m", "pytest", test_path, "-v", "--tb=short"]
+        # Use env python with pytest module if found, otherwise system pytest
+        if env_python:
+            cmd = [env_python, "-m", "pytest", test_path, "-v", "--tb=short"]
         else:
             cmd = ["pytest", test_path, "-v", "--tb=short"]
 
@@ -377,7 +497,8 @@ def run_pytest(test_path: str, args: Optional[List[str]] = None) -> Dict[str, An
             "stderr": result.stderr,
             "returncode": result.returncode,
             "success": result.returncode == 0,
-            "used_venv": venv_python is not None,
+            "used_env": env_python is not None,
+            "env_type": env_type,  # "conda", "venv", or None
         }
 
     except Exception as e:
@@ -569,6 +690,342 @@ def compare_outputs(expected: Any, actual: Any, tolerance: float = 1e-5) -> Dict
         return {
             "match": False,
             "error": f"Comparison error: {str(e)}",
+        }
+
+
+@tool
+def search_log_errors(log_path: str) -> Dict[str, Any]:
+    """
+    Search log files for error patterns and classify severity.
+
+    Args:
+        log_path: Path to log file or directory
+
+    Returns:
+        Dictionary with errors found, whether fatal, and error messages for web search
+    """
+    import re
+    import glob
+
+    result = {
+        "errors": [],
+        "fatal": False,
+        "search_queries": [],
+    }
+
+    # Read log content
+    log_content = ""
+    try:
+        log_path_obj = Path(log_path)
+        if log_path_obj.is_file():
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                log_content = f.read()
+        elif log_path_obj.is_dir():
+            for pattern in ['*.log', 'quick_test*', 'output*']:
+                for log_file in glob.glob(os.path.join(log_path, pattern)):
+                    try:
+                        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                            log_content += f.read() + "\n"
+                    except:
+                        pass
+    except Exception as e:
+        return {"errors": [f"Could not read log: {e}"], "fatal": False, "search_queries": []}
+
+    if not log_content:
+        return {"errors": ["No log content found"], "fatal": False, "search_queries": []}
+
+    # Extract error lines
+    error_patterns = [
+        r'(?:error|exception|failed|fatal)[^\n]*',
+        r'traceback[^\n]*',
+        r'(?:modulenotfounderror|importerror|runtimeerror|oserror|valueerror|typeerror)[^\n]*',
+    ]
+
+    for pattern in error_patterns:
+        matches = re.findall(pattern, log_content, re.IGNORECASE)
+        for match in matches[:5]:  # Limit per pattern
+            error_msg = match.strip()[:200]
+            if error_msg and error_msg not in result["errors"]:
+                result["errors"].append(error_msg)
+                result["search_queries"].append(error_msg)
+
+    # Mark as fatal if serious errors found
+    fatal_keywords = ['modulenotfound', 'cuda error', 'runtimeerror', 'oserror', 'jsondecode', 'connection']
+    log_lower = log_content.lower()
+    if any(kw in log_lower for kw in fatal_keywords):
+        result["fatal"] = True
+
+    if not result["errors"]:
+        result["errors"].append("No errors found")
+
+    return result
+
+
+@tool
+def search_error_solution(error_message: str) -> Dict[str, Any]:
+    """
+    Use Gemini with Google Search grounding to find solutions for an error.
+
+    Args:
+        error_message: The error message to search for
+
+    Returns:
+        Dictionary with solutions and code fixes from web search
+    """
+    import google.generativeai as genai
+
+    result = {
+        "solutions": [],
+        "raw_response": "",
+    }
+
+    try:
+        # Configure Gemini
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            return {"solutions": ["GEMINI_API_KEY not found in environment"], "raw_response": ""}
+
+        genai.configure(api_key=api_key)
+
+        # Use Gemini with search grounding
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        prompt = f"""Search for solutions to this Python error and provide actionable fixes:
+
+Error: {error_message[:500]}
+
+Provide:
+1. What causes this error
+2. How to fix it (with code examples if needed)
+3. Common solutions from Stack Overflow or GitHub issues"""
+
+        # Enable search grounding
+        response = model.generate_content(
+            prompt,
+            tools='google_search_retrieval'
+        )
+
+        if response.text:
+            result["solutions"].append(response.text)
+            result["raw_response"] = response.text
+
+    except Exception as e:
+        result["solutions"].append(f"Search failed: {str(e)}")
+
+    return result
+
+
+@tool
+def extract_experiment_metrics(output_text: str, expected_metrics_context: str = "") -> Dict[str, Any]:
+    """
+    Extract numerical metrics from experiment output.
+
+    Use this after running an experiment to extract metrics like accuracy, loss, F1, BLEU, etc.
+    This helps verify if the experiment produced the expected results from the paper.
+
+    Args:
+        output_text: The experiment output text (from log files or stdout)
+        expected_metrics_context: Optional context about what metrics to look for
+
+    Returns:
+        Dictionary with:
+            - metrics: Dict of extracted metric names and values
+            - extraction_method: How metrics were extracted (regex or llm)
+            - success: Whether any metrics were found
+    """
+    try:
+        # Try multiple paths to find the src directory
+        import sys
+        possible_paths = [
+            str(Path(__file__).parent.parent),
+            str(Path(__file__).parent.parent.parent / "src"),
+            os.path.join(os.path.dirname(__file__), "..", ".."),
+        ]
+
+        for path in possible_paths:
+            abs_path = str(Path(path).resolve())
+            if abs_path not in sys.path:
+                sys.path.insert(0, abs_path)
+
+        from agents.metrics_extractor import MetricsExtractorAgent
+
+        # Initialize metrics extractor
+        extractor = MetricsExtractorAgent()
+
+        # Extract metrics
+        result = extractor.extract_metrics(output_text, expected_metrics_context)
+
+        return {
+            "metrics": result.get("metrics", {}),
+            "extraction_method": result.get("extraction_method", "unknown"),
+            "success": len(result.get("metrics", {})) > 0,
+            "metric_count": len(result.get("metrics", {}))
+        }
+
+    except Exception as e:
+        return {
+            "metrics": {},
+            "extraction_method": "failed",
+            "success": False,
+            "error": f"Extraction error: {str(e)}"
+        }
+
+
+@tool
+def compare_with_paper_results(extracted_metrics: Dict[str, float], expected_results_str: str, tolerance: float = 0.05) -> Dict[str, Any]:
+    """
+    Compare extracted metrics with expected results from the paper.
+
+    Use this after extracting metrics to determine if the experiment succeeded.
+
+    SUCCESS CRITERIA (STRICT):
+    - Uses RELATIVE error (percentage difference) - works for any metric scale
+    - Relative error = |actual - expected| / expected
+    - ALL metrics must have relative error < tolerance (default 5%)
+    - If even ONE metric has error >= tolerance, experiment is marked as FAILURE
+    - Always reports the portion of metrics that matched (e.g., "2/3 matched")
+
+    Args:
+        extracted_metrics: Dict of metric names to values (from extract_experiment_metrics)
+        expected_results_str: String describing expected results from paper analysis
+        tolerance: Relative error tolerance (default: 0.05 = 5%). Configurable per experiment.
+
+    Returns:
+        Dictionary with:
+            - success: True ONLY if ALL metrics within tolerance
+            - match_count: Number of metrics within tolerance
+            - total_count: Total number of expected metrics
+            - success_portion: String like "2/3" showing portion of success
+            - matches: List of metrics within tolerance (with relative error %)
+            - mismatches: List of metrics outside tolerance (with relative error %)
+            - missing: List of expected metrics not found in output
+            - details: Human-readable summary
+    """
+    try:
+        import sys
+        import re
+
+        # Try multiple paths to find the src directory
+        possible_paths = [
+            str(Path(__file__).parent.parent),
+            str(Path(__file__).parent.parent.parent / "src"),
+            os.path.join(os.path.dirname(__file__), "..", ".."),
+        ]
+
+        for path in possible_paths:
+            abs_path = str(Path(path).resolve())
+            if abs_path not in sys.path:
+                sys.path.insert(0, abs_path)
+
+        # Parse expected results string to extract metric names and values
+        expected_metrics = {}
+
+        # Look for patterns like "accuracy = 0.95" or "BLEU: 28.4"
+        patterns = [
+            r'(\w+)\s*[:=]\s*(\d+\.?\d*)',
+            r'(\w+)\s+(\d+\.?\d*)%?',
+        ]
+
+        for pattern in patterns:
+            matches = re.finditer(pattern, expected_results_str, re.IGNORECASE)
+            for match in matches:
+                metric_name = match.group(1).lower().strip()
+                metric_value = match.group(2).strip()
+                try:
+                    expected_metrics[metric_name] = float(metric_value)
+                except ValueError:
+                    pass
+
+        # Compare each metric
+        match_list = []
+        mismatch_list = []
+        missing_list = []
+
+        for metric_name, expected_val in expected_metrics.items():
+            found = False
+            for extracted_name, extracted_val in extracted_metrics.items():
+                # Fuzzy matching: check if names overlap
+                if metric_name in extracted_name or extracted_name in metric_name:
+                    found = True
+
+                    # Calculate RELATIVE error (scale-invariant)
+                    abs_diff = abs(extracted_val - expected_val)
+                    if expected_val != 0:
+                        relative_error = abs_diff / abs(expected_val)
+                    else:
+                        # For expected=0, use absolute error
+                        relative_error = abs_diff
+
+                    if relative_error < tolerance:
+                        match_list.append({
+                            "metric": metric_name,
+                            "expected": expected_val,
+                            "actual": extracted_val,
+                            "relative_error": f"{relative_error*100:.2f}%",
+                            "abs_diff": abs_diff
+                        })
+                    else:
+                        mismatch_list.append({
+                            "metric": metric_name,
+                            "expected": expected_val,
+                            "actual": extracted_val,
+                            "relative_error": f"{relative_error*100:.2f}%",
+                            "abs_diff": abs_diff
+                        })
+                    break
+
+            if not found:
+                missing_list.append(metric_name)
+
+        # Calculate success
+        total_count = len(expected_metrics)
+        match_count = len(match_list)
+
+        # STRICT: Success only if ALL metrics matched (no mismatches, no missing)
+        all_matched = (match_count == total_count and len(mismatch_list) == 0 and len(missing_list) == 0)
+
+        success_portion = f"{match_count}/{total_count}" if total_count > 0 else "0/0"
+
+        # Generate human-readable details
+        tolerance_pct = f"{tolerance*100:.0f}%"
+        if all_matched:
+            details = f"✅ SUCCESS: All {total_count} metrics within {tolerance_pct} relative error"
+        elif match_count > 0:
+            details = f"⚠️ PARTIAL: {success_portion} metrics matched ({tolerance_pct} tolerance). "
+            if mismatch_list:
+                details += f"{len(mismatch_list)} mismatch(es): "
+                details += ", ".join([f"{m['metric']} ({m['relative_error']})" for m in mismatch_list[:2]])
+                if len(mismatch_list) > 2:
+                    details += f", +{len(mismatch_list)-2} more"
+            if missing_list:
+                details += f" | {len(missing_list)} missing: {', '.join(missing_list[:2])}"
+        else:
+            details = f"❌ FAILURE: 0/{total_count} metrics matched."
+
+        return {
+            "success": all_matched,
+            "match_count": match_count,
+            "total_count": total_count,
+            "success_portion": success_portion,
+            "matches": match_list,
+            "mismatches": mismatch_list,
+            "missing": missing_list,
+            "tolerance_used": tolerance,
+            "tolerance_type": "relative",
+            "details": details
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "match_count": 0,
+            "total_count": 0,
+            "success_portion": "0/0",
+            "matches": [],
+            "mismatches": [],
+            "missing": [],
+            "error": f"Comparison error: {str(e)}",
+            "details": f"❌ ERROR: {str(e)}"
         }
 
 
@@ -838,6 +1295,238 @@ def _get_or_install_pyenv_python(python_version: str) -> Optional[str]:
         return None
 
 
+# ============================================================================
+# Conda Environment Management Helpers
+# ============================================================================
+
+def _check_conda_available() -> bool:
+    """Check if conda is available on the system."""
+    import shutil
+    return shutil.which("conda") is not None
+
+
+def _detect_conda_requirements(repo_path: str) -> Optional[Path]:
+    """
+    Detect if repository uses conda by looking for environment files.
+
+    Args:
+        repo_path: Path to repository
+
+    Returns:
+        Path to conda environment file if found, None otherwise
+    """
+    repo = Path(repo_path)
+    candidates = [
+        "environment.yml",
+        "environment.yaml",
+        "conda_environment.yml",
+        "conda_environment.yaml",
+        "env.yml",
+        "env.yaml",
+        "requirements.yaml",
+        "requirements.yml",
+    ]
+
+    for candidate in candidates:
+        env_file = repo / candidate
+        if env_file.exists():
+            # For requirements.yaml/yml, verify it's conda format (has channels/dependencies)
+            if "requirements" in candidate:
+                try:
+                    with open(env_file, 'r') as f:
+                        content = f.read()
+                        if 'channels:' in content or 'dependencies:' in content:
+                            return env_file
+                except:
+                    pass
+            else:
+                return env_file
+
+    return None
+
+
+def _generate_conda_env_name(repo_path: str) -> str:
+    """
+    Generate a unique conda environment name for a repository.
+
+    Args:
+        repo_path: Path to repository
+
+    Returns:
+        Environment name like "paper_repo_name_abc123"
+    """
+    import hashlib
+
+    repo = Path(repo_path).resolve()
+    repo_name = repo.name
+
+    # Create short hash of full path to ensure uniqueness
+    path_hash = hashlib.md5(str(repo).encode()).hexdigest()[:8]
+
+    # Sanitize repo name (conda env names can't have special chars)
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', repo_name)
+
+    return f"paper_{safe_name}_{path_hash}"
+
+
+def _create_conda_env(env_name: str, python_version: Optional[str] = None, env_file: Optional[Path] = None) -> bool:
+    """
+    Create conda environment with specific Python version or from environment file.
+
+    Args:
+        env_name: Name for the conda environment
+        python_version: Python version like "3.9" (if creating from scratch)
+        env_file: Path to environment.yml file (if creating from file)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Check if environment already exists
+        list_result = subprocess.run(
+            ["conda", "env", "list"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        if env_name in list_result.stdout:
+            print(f"✅ Conda environment '{env_name}' already exists")
+            return True
+
+        if env_file and env_file.exists():
+            # Create from environment.yml file
+            print(f"📦 Creating conda environment '{env_name}' from {env_file.name}...")
+            print(f"   This may take several minutes...")
+
+            result = subprocess.run(
+                ["conda", "env", "create", "-n", env_name, "-f", str(env_file)],
+                capture_output=True,
+                text=True,
+                timeout=1800  # 30 minutes for conda install
+            )
+        else:
+            # Create from scratch with Python version
+            python_spec = f"python={python_version}" if python_version else "python"
+            print(f"📦 Creating conda environment '{env_name}' with {python_spec}...")
+            print(f"   This may take several minutes...")
+
+            result = subprocess.run(
+                ["conda", "create", "-n", env_name, python_spec, "-y"],
+                capture_output=True,
+                text=True,
+                timeout=1800
+            )
+
+        if result.returncode != 0:
+            print(f"❌ Conda environment creation failed:")
+            print(f"   {result.stderr[:500]}")
+            return False
+
+        print(f"✅ Conda environment '{env_name}' created successfully")
+        return True
+
+    except subprocess.TimeoutExpired:
+        print(f"❌ Conda environment creation timed out (>30 minutes)")
+        return False
+    except Exception as e:
+        print(f"❌ Error creating conda environment: {str(e)}")
+        return False
+
+
+def _get_conda_env_python(env_name: str) -> Optional[str]:
+    """
+    Get Python executable path from conda environment.
+
+    Args:
+        env_name: Name of conda environment
+
+    Returns:
+        Path to Python executable or None if failed
+    """
+    try:
+        # Get conda environment info
+        result = subprocess.run(
+            ["conda", "env", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            print(f"⚠️  Failed to list conda environments: {result.stderr}")
+            return None
+
+        # Parse environment list to find path
+        for line in result.stdout.split('\n'):
+            if env_name in line and not line.startswith('#'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    env_path = parts[-1]  # Last part is the path
+
+                    # Construct Python path
+                    if os.name == 'nt':  # Windows
+                        python_path = Path(env_path) / "python.exe"
+                    else:  # Linux/Mac
+                        python_path = Path(env_path) / "bin" / "python"
+
+                    if python_path.exists():
+                        print(f"✅ Found conda Python: {python_path}")
+                        return str(python_path)
+
+        # Alternative method: use conda run to find python
+        result = subprocess.run(
+            ["conda", "run", "-n", env_name, "which", "python"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0:
+            python_path = result.stdout.strip()
+            if python_path and Path(python_path).exists():
+                print(f"✅ Found conda Python via 'conda run': {python_path}")
+                return python_path
+
+        print(f"⚠️  Could not find Python executable for conda env '{env_name}'")
+        return None
+
+    except Exception as e:
+        print(f"❌ Error getting conda environment Python: {str(e)}")
+        return None
+
+
+def _get_conda_pip(env_name: str) -> Optional[str]:
+    """
+    Get pip executable path from conda environment.
+
+    Args:
+        env_name: Name of conda environment
+
+    Returns:
+        Path to pip executable or command to run pip
+    """
+    python_path = _get_conda_env_python(env_name)
+    if not python_path:
+        return None
+
+    # Check if pip exists in conda environment
+    if os.name == 'nt':  # Windows
+        pip_path = Path(python_path).parent / "pip.exe"
+    else:  # Linux/Mac
+        pip_path = Path(python_path).parent / "pip"
+
+    if pip_path.exists():
+        return str(pip_path)
+
+    # Fallback: use python -m pip
+    return f"{python_path} -m pip"
+
+
+# ============================================================================
+# Virtual Environment Management Helpers
+# ============================================================================
+
 def _create_venv_with_python(venv_path: Path, python_executable: str) -> bool:
     """
     Create virtual environment using specific Python executable.
@@ -882,17 +1571,100 @@ def _create_venv_with_python(venv_path: Path, python_executable: str) -> bool:
         return False
 
 
+def _install_with_conda(repo_path: str, conda_env_file: Path) -> Dict[str, Any]:
+    """
+    Install dependencies using conda in an isolated conda environment.
+
+    Args:
+        repo_path: Path to repository
+        conda_env_file: Path to environment.yml file
+
+    Returns:
+        Installation result with status and any errors
+    """
+    try:
+        import sys
+
+        # Generate unique conda environment name
+        env_name = _generate_conda_env_name(repo_path)
+
+        print(f"📦 Installing with Conda")
+        print(f"   Environment name: {env_name}")
+        print(f"   Environment file: {conda_env_file.name}")
+        print(f"   This creates an ISOLATED conda environment (won't affect your main env)\n")
+
+        # Step 1: Create conda environment from environment.yml
+        success = _create_conda_env(env_name, env_file=conda_env_file)
+
+        if not success:
+            return {
+                "success": False,
+                "error": f"Failed to create conda environment from {conda_env_file.name}",
+                "env_type": "conda",
+                "env_name": env_name,
+            }
+
+        # Step 2: Get Python and pip paths from conda environment
+        conda_python = _get_conda_env_python(env_name)
+        conda_pip = _get_conda_pip(env_name)
+
+        if not conda_python:
+            return {
+                "success": False,
+                "error": f"Failed to locate Python in conda environment '{env_name}'",
+                "env_type": "conda",
+                "env_name": env_name,
+            }
+
+        # Step 3: Verify installation
+        print(f"\n✅ Conda environment created successfully!")
+        print(f"   Environment name: {env_name}")
+        print(f"   Python: {conda_python}")
+        print(f"   Pip: {conda_pip}")
+        print(f"\n   To activate: conda activate {env_name}")
+        print(f"   To remove: conda env remove -n {env_name}\n")
+
+        # Get Python version from conda env
+        version_result = subprocess.run(
+            [conda_python, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        python_version = version_result.stdout.strip() if version_result.returncode == 0 else "unknown"
+
+        return {
+            "success": True,
+            "env_type": "conda",
+            "env_name": env_name,
+            "conda_python": conda_python,
+            "conda_pip": conda_pip,
+            "python_version_used": python_version,
+            "environment_file": str(conda_env_file),
+            "activation_command": f"conda activate {env_name}",
+            "removal_command": f"conda env remove -n {env_name}",
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Conda installation error: {str(e)}",
+            "env_type": "conda",
+        }
+
+
 @tool
 def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
     """
-    Install dependencies using intelligent fallback strategies in an isolated virtual environment.
+    Install dependencies using intelligent fallback strategies in an isolated environment.
 
     This tool will:
-    1. Check required Python version for the repo
-    2. Create a virtual environment with the correct Python version (using pyenv if needed)
-    3. Try installing with original requirements
-    4. If that fails, try with relaxed version constraints
-    5. If that fails, try with unpinned versions
+    1. Detect if repo uses conda (environment.yml) or pip (requirements.txt)
+    2. Check required Python version for the repo
+    3. Create isolated environment (conda env or venv) with correct Python version
+    4. Try installing with original requirements
+    5. If that fails, try with relaxed version constraints (pip only)
+    6. If that fails, try with unpinned versions (pip only)
 
     Args:
         repo_path: Path to repository
@@ -905,6 +1677,31 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
         import venv
         import shutil
 
+        # Step 0: Detect if repo uses conda
+        print("🔍 Detecting dependency management system...")
+        conda_env_file = _detect_conda_requirements(repo_path)
+        use_conda = conda_env_file is not None and _check_conda_available()
+
+        if conda_env_file and not _check_conda_available():
+            print(f"⚠️  Found {conda_env_file.name} but conda is not installed")
+            print(f"   Install conda: https://docs.conda.io/en/latest/miniconda.html")
+            print(f"   Falling back to pip installation...\n")
+            use_conda = False
+        elif use_conda:
+            print(f"✅ Detected conda requirements: {conda_env_file.name}")
+            print(f"   Will use conda for installation\n")
+        else:
+            print(f"✅ Using pip/venv for installation\n")
+
+        # =====================================================================
+        # CONDA INSTALLATION PATH
+        # =====================================================================
+        if use_conda:
+            return _install_with_conda(repo_path, conda_env_file)
+
+        # =====================================================================
+        # PIP/VENV INSTALLATION PATH (original logic)
+        # =====================================================================
         venv_path = Path(repo_path) / "venv"
 
         # Step 1: Check Python version compatibility
@@ -1197,4 +1994,6 @@ code_execution_tools = [
     compare_outputs,
     check_python_compatibility,
     smart_install_dependencies,
+    extract_experiment_metrics,
+    compare_with_paper_results,
 ]

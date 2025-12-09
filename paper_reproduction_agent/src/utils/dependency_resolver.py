@@ -152,6 +152,19 @@ class DependencyResolver:
             result["errors"].append(f"Stopping early: {reason}")
             return result
 
+        # Strategy 1.5: Try pre-built wheels for problematic packages (NEW)
+        strategy_result = self._try_prebuilt_wheels()
+        result["attempts"].append(strategy_result)
+
+        if strategy_result["success"]:
+            result["success"] = True
+            result["strategy_used"] = "prebuilt_wheels"
+            result["dependencies_installed"] = True
+            result["warnings"].append("Used pre-built wheels for some packages")
+            return result
+
+        self.error_detector.add_error(strategy_result.get("error", ""))
+
         # Strategy 2: Try relaxing version constraints
         strategy_result = self._try_relaxed_versions()
         result["attempts"].append(strategy_result)
@@ -352,6 +365,72 @@ class DependencyResolver:
                 "strategy": "unpinned",
                 "error": str(e)
             }
+
+    def _try_prebuilt_wheels(self) -> Dict:
+        """
+        Try installing with pre-built wheels for packages known to have compilation issues.
+
+        This strategy uses --only-binary for problematic packages (tokenizers, torch, etc.)
+        to avoid Rust/C++ compilation errors, especially on Python 3.12+.
+        """
+        req_file = self._find_requirements_file()
+        setup_file = self.repo_path / "setup.py"
+
+        # Packages that commonly have compilation issues
+        problematic_packages = [
+            'tokenizers',      # Rust compilation issues
+            'sentencepiece',   # C++ compilation issues
+            'apex',            # CUDA/C++ issues
+            'fairseq',         # C++ extensions
+            'pycocotools',     # C extensions
+        ]
+
+        # Check if any problematic packages are in requirements
+        has_problematic = False
+        if req_file:
+            requirements = req_file.read_text(encoding='utf-8', errors='ignore')
+            for pkg in problematic_packages:
+                if pkg in requirements.lower():
+                    has_problematic = True
+                    break
+
+        if setup_file.exists() and not has_problematic:
+            setup_content = setup_file.read_text(encoding='utf-8', errors='ignore')
+            for pkg in problematic_packages:
+                if pkg in setup_content.lower():
+                    has_problematic = True
+                    break
+
+        if not has_problematic:
+            return {
+                "success": False,
+                "strategy": "prebuilt_wheels",
+                "error": "No problematic packages detected - skipping this strategy"
+            }
+
+        # Build command with --only-binary for problematic packages
+        binary_flags = []
+        for pkg in problematic_packages:
+            binary_flags.append(f"--only-binary {pkg}")
+
+        if req_file:
+            command = f"pip install {' '.join(binary_flags)} -r {req_file.name}"
+        elif setup_file.exists():
+            command = f"pip install {' '.join(binary_flags)} -e ."
+        else:
+            return {
+                "success": False,
+                "strategy": "prebuilt_wheels",
+                "error": "No requirements file or setup.py found"
+            }
+
+        return {
+            "success": False,  # Will be determined by actual installation
+            "strategy": "prebuilt_wheels",
+            "command": command,
+            "modifications": f"Using --only-binary for: {', '.join(problematic_packages)}",
+            "note": "This avoids Rust/C++ compilation by using pre-built wheels"
+        }
 
     def _find_requirements_file(self) -> Optional[Path]:
         """Find requirements file in repository."""
