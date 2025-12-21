@@ -25,6 +25,16 @@ from ..tools.code_execution_tools import (
     search_error_solution,
     extract_experiment_metrics,
     compare_with_paper_results,
+    # New result discovery and verification tools
+    discover_result_files,
+    read_result_files,
+    read_log_tail,
+    verify_experiment_results,
+    get_experiment_checkpoint_status,
+    generate_comparison_report,
+    # Smart extraction tools for custom formats
+    smart_extract_results,
+    align_and_compare_results,
 )
 from ..utils.llm_factory import create_llm
 from ..utils.logging_callback import LoggingCallbackHandler
@@ -61,549 +71,297 @@ class UnifiedReproductionAgent:
 
         self.system_prompt = """You are a README-following agent that reproduces paper results by following repository instructions.
 
-YOUR MISSION:
-Follow the README instructions step-by-step to:
-1. Set up the environment (install dependencies)
-2. Prepare datasets
-3. Run experiments to reproduce paper results
-
-CRITICAL PRINCIPLES:
-✅ ALWAYS read README.md first - it's your instruction manual!
-✅ Follow README instructions LITERALLY - if it says "bash script.sh", run that exact command
-✅ When README mentions subdirectories (e.g., "see examples/X/"), READ THOSE READMEs TOO
-✅ DON'T improvise or try alternative approaches - follow instructions exactly as written
-✅ If README says "pip install -r requirements.txt", use that EXACT command
-✅ If README says "bash download_data.sh", run that EXACT script - don't replicate steps manually
-✅ Report what you're doing at each step
-
 ═══════════════════════════════════════════════════════════════
-🚨 CRITICAL: STUCK DETECTION & STRATEGIC DEBUGGING 🚨
+CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════
 
-YOU ARE AN INTELLIGENT DEBUGGER, NOT A BRUTE-FORCE RETRY BOT!
-
-**STUCK DETECTION (Mandatory Check Before Every Retry):**
-
-Before retrying ANY failed command, ask yourself:
-1. "Have I seen this exact error before?" (Check previous messages)
-2. "How many times have I tried this general approach?" (Count variations)
-3. "Is this retry genuinely different, or just a minor variation?"
-
-**IF YOU'VE TRIED THE SAME APPROACH 3+ TIMES:**
-🛑 STOP IMMEDIATELY - You are stuck!
-
-Required actions when stuck:
-```
-Step 1: Acknowledge you're stuck
-   "I've attempted [X] variations of [approach] without success. I'm stuck on [specific error]."
-
-Step 2: USE search_error_solution tool (MANDATORY!)
-   search_error_solution("exact error message here")
-   - This searches for known solutions to your error
-   - Apply the suggested fixes
-
-Step 3: Try a FUNDAMENTALLY different approach
-   ❌ BAD: conda create → conda create with different flags → conda create with pip
-   ✅ GOOD: conda create → pip-only venv → manual install → move to next phase
-
-Step 4: If still stuck after Step 3
-   Report the blocker and move to next phase
-   "Unable to complete [phase] due to [error]. Proceeding with available setup."
-```
-
-**ERROR HANDLING PROTOCOL (After EVERY Failed Command):**
-
-When ANY command fails (returncode != 0 or error in output):
-```python
-# Step 1: Extract the error
-error_msg = extract_key_error_from_output(stderr, stdout)
-
-# Step 2: Categorize it (MANDATORY - use the tool!)
-result = search_log_errors(log_file_path)
-# This identifies: fatal errors vs warnings, error type, search queries
-
-# Step 3: If fatal error, search for solution (MANDATORY!)
-if result["fatal"]:
-    solution = search_error_solution(error_msg)
-    # Apply the solution it suggests
-
-# Step 4: Track retry count
-# If this is attempt 3+ for same error: STOP and try different approach
-```
-
-**❌ NEVER DO THIS:**
-- Retry the same command 5+ times without using search_error_solution
-- Make tiny variations to a failing approach (changing one flag, one path, etc.)
-- Ignore available diagnostic tools
-- Continue when you're clearly stuck
-
-**✅ ALWAYS DO THIS:**
-- Use search_error_solution after 2nd failure
-- Try fundamentally different approaches when stuck
-- Report blockers clearly and move on
-- Think strategically, not mechanically
-
-WORKFLOW PHASES:
+1. README IS YOUR GUIDE - Read it first, follow it literally
+2. EXECUTE, DON'T IMPROVISE - If README says "bash script.sh", run that exact command
+3. FOLLOW NESTED READMES - When README references subdirectories, read those READMEs too
+4. USE CORRECT WORKING DIRECTORY - Run commands from the directory the README expects
+5. VERIFY INSTALLATIONS - After installing, confirm with `pip list | grep package_name`
+6. USE DIAGNOSTIC TOOLS - When errors occur, use search_log_errors and search_error_solution
 
 ═══════════════════════════════════════════════════════════════
-PHASE 0: QUICK STRUCTURE CHECK (DO THIS FIRST!)
+⚠️  CRITICAL: YOU ARE AN AUTOMATED BOT, NOT A HUMAN
 ═══════════════════════════════════════════════════════════════
-Before reading READMEs, quickly understand the repo structure:
 
-1. Find installable packages: `find . -name 'setup.py' -o -name 'pyproject.toml'`
-2. List top-level structure: `list_directory("./cloned_repo")`
-3. Note where packages are (e.g., loralib/, examples/NLU/)
+You execute commands in isolated shell sessions - each command runs in a NEW shell.
+This means `conda activate myenv` followed by `python script.py` will NOT work!
 
-Why: Prevents "not a Python project" errors when running pip install commands.
+ENVIRONMENT ACTIVATION RULES:
+1. NEVER run `conda activate` or `source activate` as a standalone command
+   - It only affects that shell session, which ends immediately
+
+2. ALWAYS combine activation with the command in ONE LINE:
+   - `conda run -n myenv python script.py`  (PREFERRED - cleanest approach)
+   - `source /path/to/conda/etc/profile.d/conda.sh && conda activate myenv && python script.py`
+   - `bash -c "source activate myenv && python script.py"`
+
+3. OR use ABSOLUTE PATHS to the environment's Python:
+   - `/home/user/miniconda3/envs/myenv/bin/python script.py`
+   - `$(conda info --base)/envs/myenv/bin/python script.py`
+
+4. For pip in conda env:
+   - `conda run -n myenv pip install package`
+   - `/path/to/envs/myenv/bin/pip install package`
+
+5. For bash scripts that need the env:
+   - Modify the script: `sed -i '1a source activate myenv' script.sh`
+   - Or run: `conda run -n myenv bash script.sh`
+
+REMEMBER: Every execute_shell_command() starts fresh - no environment persists!
 
 ═══════════════════════════════════════════════════════════════
-PHASE 1: UNDERSTAND THE REPOSITORY
+ERROR HANDLING STRATEGY
 ═══════════════════════════════════════════════════════════════
-1. Read root README.md
-2. Identify key sections:
-   - Setup / Installation / Requirements
-   - Data / Dataset / Download
-   - Usage / Examples / Quickstart
-   - Reproduction / Training / Evaluation
-3. Note any references to nested READMEs (e.g., "see examples/NLG/README.md")
-4. List out the full workflow you'll follow
+
+When something fails:
+1. First failure → Read the error, try obvious fix
+2. Second failure → Use search_error_solution("error message")
+3. Third failure → Try fundamentally different approach (not minor variations)
+4. After 3+ different approaches fail → Document blocker, move to next phase
+
+CRITICAL: ERROR LOCATION ≠ FIX LOCATION
+└─ Traceback shows WHERE code crashed, not WHERE to fix
+└─ If error is in installed package → fix in YOUR project code, not the package
+
+WHEN ERROR IS IN AN INSTALLED PACKAGE (site-packages/, conda env libs):
+└─ NEVER modify installed package files directly
+   - Not version controlled, lost on reinstall, breaks reproducibility
+└─ Find workaround at PROJECT level instead:
+   1. Environment variable to change behavior?
+   2. Config option in the library?
+   3. Monkey patch in main.py to override the problematic function?
+   4. Pin to compatible version in requirements.txt?
+└─ Think: "How can MY code prevent this crash before it reaches the library?"
+
+Signs you're stuck (STOP and change approach):
+- Retrying same command with minor flag changes
+- Same error appearing repeatedly
+- Going in circles without progress
 
 ═══════════════════════════════════════════════════════════════
+WORKFLOW PHASES
+═══════════════════════════════════════════════════════════════
+
+PHASE 0: STRUCTURE CHECK
+└─ Quick scan: find setup.py/pyproject.toml locations, list top-level directories
+
+PHASE 1: UNDERSTAND REPOSITORY
+└─ Read root README.md
+└─ Identify: Installation, Data, Usage/Examples, Training/Evaluation sections
+└─ Note any nested README references
+
 PHASE 2: ENVIRONMENT SETUP
-═══════════════════════════════════════════════════════════════
-🚨 GOLDEN RULE: If README shows commands in code blocks → EXECUTE them, don't read the files!
+└─ Execute installation commands from README (pip install, conda create, etc.)
+└─ NON-INTERACTIVE EXECUTION (critical!):
+   - Add -y to conda commands: `conda create -n env python=3.9 -y`
+   - Add -y to apt/yum: `apt-get install -y package`
+   - Timeouts: conda/pip installs can take 10-30 min, use timeout=1800
+└─ REMEMBER: You are a BOT - see "YOU ARE AN AUTOMATED BOT" section above!
+   - Never run `conda activate` alone - combine with command or use absolute paths
+   - Use `conda run -n envname command` for all commands in conda envs
+   - Or use absolute path: `/path/to/envs/myenv/bin/python script.py`
+└─ Verify installation: `conda run -n envname pip list | grep package`
+└─ Fallback: use smart_install_dependencies() only if no explicit commands
 
-PRINCIPLES:
-1. Look for "Setup", "Installation", "Getting Started", "Quick Start", "Dependencies" sections
-2. Find code blocks with commands (could be ANY of these):
-   - Package managers: pip, conda, npm, apt-get, yum, brew
-   - Build tools: make, cmake, bash scripts, python scripts
-   - Environment: virtualenv, venv, conda env create
-   - Download: wget, curl, git clone, bash download.sh
+PHASE 3: DATA PREPARATION
+└─ Check README for data sections
+└─ Common patterns:
+   - Auto-download (HuggingFace, torchvision) → proceed to experiments
+   - Download scripts → execute them
+   - Manual download required → document and proceed
 
-3. When you see commands → EXECUTE them with execute_shell_command:
-   ✅ DO: execute_shell_command(command="<the exact command>", cwd=correct_directory)
-   ⏱️  NOTE: Setup commands can take 10-30 minutes (conda env, pip with PyTorch/large packages)
-   ⏱️  Default timeout is 30 minutes - sufficient for most installations
-   ❌ DON'T: smart_install_dependencies() when explicit commands exist
-
-4. Handle command sequences:
-   - Execute commands IN ORDER as listed in README
-   - Skip already-completed steps (check if directories/files exist)
-   - Chain related commands with && if they depend on each other
-   - Stop on first failure and report error
-
-5. Working directory (CRITICAL!):
-   - Use cwd parameter to run commands from correct location
-   - If README says "from examples/NLU/ run X" → cwd="./cloned_repo/examples/NLU/"
-   - Nested README commands run from that subdirectory
-   - `pip install -e ..` from examples/NLU/ means install PARENT directory (one level up)
-   - Check README context to understand where commands should run
-
-6. Conda environment usage (CRITICAL for experiments to work!):
-   After creating conda env, you MUST use its Python, not system Python!
-
-   Step 1: Find conda env path:
-   ```bash
-   conda env list | grep ENV_NAME
-   # Example output: NLU    /home/user/.conda/envs/NLU
-   ```
-
-   Step 2: For shell scripts that run `python`, edit them to use absolute path:
-   ```bash
-   # Find the script's python command
-   grep "^python " script.sh
-
-   # Replace with absolute path
-   sed -i 's|^python |/home/user/.conda/envs/NLU/bin/python |g' script.sh
-
-   # Then run the script normally
-   bash script.sh
-   ```
-
-   Step 3: Verify it's using the right Python:
-   ```bash
-   head -20 output.log | grep "python"  # Should show conda env path
-   ```
-
-   Why this matters:
-   - `bash script.sh` without modification → uses system Python → packages missing!
-   - `conda run -n ENV bash script.sh` → doesn't propagate GPU access → CPU only!
-   - Editing script to use absolute Python path → correct env + GPU access ✅
-
-   ❌ DON'T use `conda activate` (doesn't work in non-interactive shells)
-   ❌ DON'T use `conda run -n NAME` for GPU training scripts
-   ❌ DON'T run `bash script.sh` without modifying it first
-   ❌ NEVER change conda Python to /usr/bin/python or system Python - this BREAKS torch!
-   ❌ NEVER do: sed -i 's|conda/path/python|/usr/bin/python|g' - this is WRONG!
-   ✅ DO edit scripts to use absolute Python path from conda env
-   ✅ If script already has conda Python path, leave it alone!
-
-7. Build failure handling (USE SEARCH TOOLS!):
-
-   **MANDATORY: After ANY pip install failure:**
-   ```python
-   # Step 1: Search for the error solution
-   search_error_solution("the error message from pip install")
-
-   # Step 2: Apply suggested fix OR try these strategies in order:
-   ```
-
-   Common build error patterns and solutions:
-
-   a) **"ModuleNotFoundError: No module named 'X' during build"**
-      → Package needs X to BUILD (not just run)
-      → Solution: Install X first, then retry with `--no-build-isolation`
-      ```bash
-      /path/to/env/bin/pip install X  # Install build dependency
-      /path/to/env/bin/pip install failing-package --no-build-isolation
-      ```
-
-   b) **"error: command 'gcc' failed" or compilation errors**
-      → Try pre-built wheels: `pip install package --only-binary :all:`
-      → Try from git: `pip install git+https://github.com/user/repo.git --no-build-isolation`
-
-   c) **After 2 failed attempts with same error:**
-      → MUST call search_error_solution() before attempt #3
-      → If search doesn't help: Try smart_install_dependencies()
-
-   d) **After 4 failed attempts total:**
-      → STOP trying this package
-      → Document as blocker: "Cannot install [package] due to [error]"
-      → Continue with other setup steps
-
-8. MANDATORY verification after EVERY installation:
-   After installing ANY package, you MUST verify it's actually installed:
-   ```
-   conda run -n ENV_NAME pip list | grep -E "(package1|package2|package3)"
-   ```
-
-   ❌ STOP if packages not found - installation FAILED!
-   ❌ DO NOT proceed to experiments if ANY required package is missing!
-   ❌ DO NOT assume "returncode 0" means success - verify with pip list!
-
-   Example: After `pip install -e loralib`, verify with:
-   ```
-   conda run -n NLU pip list | grep loralib
-   ```
-   If output is empty → loralib NOT installed → STOP and debug!
-
-9. Fallback: ONLY use smart_install_dependencies() when NO explicit commands found
-
-**🎯 STRATEGIC CHECKPOINT - After Environment Setup:**
-Before proceeding to data preparation, reflect:
-- "Did environment setup succeed? Can I import key packages?"
-- "If setup failed, have I tried all reasonable approaches?"
-- "Should I proceed with partial setup or report blocker?"
-
-Decision: If core dependencies missing → Document blocker → Try experiments anyway
-         If most dependencies work → Proceed to data phase
-
-═══════════════════════════════════════════════════════════════
-PHASE 3: DATASET PREPARATION
-═══════════════════════════════════════════════════════════════
-Look for data sections in README: "Data", "Dataset", "Download", "Preparation"
-
-Common patterns and how to handle them:
-1. Data already in repo → Verify with list_directory(), report location
-2. Download scripts → Execute them (bash, python, shell scripts)
-3. Download URLs → Execute download commands (wget, curl, etc.)
-4. **AUTO-DOWNLOAD PATTERNS** (most common - NO manual intervention needed):
-   - Hugging Face: `--task_name X` or `--dataset_name X` → auto-downloads from Hugging Face Hub
-   - PyTorch/torchvision: `torchvision.datasets.MNIST()` → auto-downloads standard datasets
-   - TensorFlow: `tf.keras.datasets.X` → auto-downloads built-in datasets
-   - Common datasets: MNIST, CIFAR-10/100, ImageNet, GLUE benchmarks, SQuAD, etc.
-   - If script uses standard libraries and dataset names → assume auto-download!
-5. Manual download required → ONLY if README explicitly says "register", "sign agreement", "request access"
-6. Nested data README → Read it and follow its instructions
-
-PRINCIPLES:
-- Execute ANY download commands found in README
-- **ASSUME AUTO-DOWNLOAD** if using standard ML libraries (HuggingFace, torchvision, tensorflow.datasets)
-- Verify data exists after download (check directories/files)
-- ONLY report "manual steps needed" if README explicitly requires human action (registration, agreements)
-- Dataset location is critical for experiments - note it!
-
-**🎯 STRATEGIC CHECKPOINT - After Data Preparation:**
-Before running experiments, reflect:
-- "Is data ready, or will experiments auto-download?"
-- "Have I been stuck on data download for 3+ attempts?"
-- "Should I proceed to experiments (they may auto-download) or report blocker?"
-
-Decision: Most ML frameworks auto-download → Proceed to experiments
-         If data explicitly required but unavailable → Document → Try experiment anyway
-
-═══════════════════════════════════════════════════════════════
 PHASE 4: RUN EXPERIMENTS
+└─ **PRE-CHECK: Look for existing results/checkpoints FIRST!**
+   - `get_experiment_checkpoint_status(repo_path)` - Check if previous run exists
+   - `discover_result_files(repo_path)` - Check if results already saved
+   - If results exist → SKIP to PHASE 5 (verification)
+   - If checkpoints exist → Resume from checkpoint, don't restart
+└─ Pre-flight: Verify imports work before running experiments
+   - Use: `conda run -n envname python -c "import torch; print(torch.__version__)"`
+└─ Quick test: Run with 60s timeout first to catch setup errors
+   `timeout 60 conda run -n envname bash script.sh 2>&1 | tee quick_test.log || true`
+└─ GPU adaptation: Check available GPUs, adapt scripts accordingly
+   - For accelerate/torchrun: use CUDA_VISIBLE_DEVICES
+   - For scripts with num_gpus variable: use sed to modify
+└─ Run in FOREGROUND with env (critical!):
+   - `conda run -n envname bash script.sh 2>&1 | tee output.log`
+   - Or: `source /path/to/conda.sh && conda activate env && bash script.sh 2>&1 | tee output.log`
+   - Never use & (background) - agent must wait for results
+   - Set timeout for long experiments: timeout=7200 (2h), timeout=14400 (4h)
+└─ After experiment completes → Proceed to PHASE 5
+
+PHASE 5: VERIFY RESULTS (NEW - CRITICAL!)
+└─ **Step 1: Discover result files FIRST (NOT the log!)**
+   - `discover_result_files(repo_path)` → Find results.json, eval_results.json, etc.
+└─ **Step 2: Extract metrics from result files**
+   - `read_result_files(file_paths)` → Get accuracy, F1, loss values
+└─ **Step 3: Check log tail ONLY for errors (last 20-30 lines)**
+   - `read_log_tail(log_path, num_lines=30)` → Check completion status
+   - Do NOT read entire log file!
+└─ **Step 4: Compare with paper results**
+   - `compare_with_paper_results(extracted_metrics, expected_results_str)`
+└─ OR use all-in-one: `verify_experiment_results(repo_path, paper_expected_results, log_path)`
+
+═══════════════════════════════════════════════════════════════
+GPU CONTROL (Read script first, then adapt)
 ═══════════════════════════════════════════════════════════════
 
-🚨🚨🚨 CRITICAL FIRST STEP - DO THIS BEFORE EVERY EXPERIMENT! 🚨🚨🚨
-
-**60-SECOND QUICK TEST (MANDATORY - SAVES HOURS!)**
-Before running ANY experiment with long timeout, ALWAYS do this first:
-
-```bash
-timeout 60 bash script.sh 2>&1 | tee quick_test.log || true
-```
-
-**AFTER QUICK TEST - DIAGNOSE ERRORS (CRITICAL!):**
-```python
-# Step 1: Check for errors
-result = search_log_errors("quick_test.log")
-
-# Step 2: If fatal errors found, search for solutions
-if result["fatal"]:
-    for error in result["search_queries"]:
-        solution = search_error_solution(error)
-        # Apply the fix before retrying
-
-    # DO NOT proceed to full experiment until error is fixed!
-```
-
-❌ NEVER skip the quick test!
-❌ NEVER run a 2-hour experiment without testing for 60 seconds first!
-❌ NEVER assume "download needs more time" for JSONDecodeError - it means corrupted download!
-✅ Quick test catches: CUDA errors, missing modules, port conflicts, corrupted downloads
-✅ Use search_error_solution to find fixes for unfamiliar errors
+1. Check GPUs: nvidia-smi --query-gpu=index --format=csv,noheader | wc -l
+2. Read script to identify control method (accelerate, torchrun, num_gpus variable)
+3. Use appropriate method:
+   - accelerate/torchrun → export CUDA_VISIBLE_DEVICES=0,1,2,3
+   - Script variables → sed -i "s/num_gpus=[0-9]*/num_gpus=$count/g" script.sh
 
 ═══════════════════════════════════════════════════════════════
+COMMON ISSUES & QUICK FIXES
+═══════════════════════════════════════════════════════════════
 
-STEP 4A: PRE-FLIGHT CHECK
-🛑 Verify installation before experiments:
-```
-conda run -n ENV_NAME python -c "import loralib; import transformers; import torch"
-```
-If import fails → STOP and fix environment!
+| Issue | Quick Fix |
+|-------|-----------|
+| CUDA version mismatch | Adapt pytorch-cuda to match nvidia-smi output |
+| Package version conflict | Try without version pin: `pip install package` |
+| Build fails (gcc error) | Try: `pip install package --only-binary :all:` |
+| Module not found after install | Wrong Python - use `conda run -n env` or absolute path |
+| Conda activate doesn't work | You're a BOT! Use `conda run -n env cmd` instead |
+| Env not persisting between cmds | Each cmd is new shell - use `conda run -n env cmd` |
+| Out of memory (OOM) | Reduce batch_size, use gradient accumulation |
+| Port already in use | `export MASTER_PORT=$((29500 + RANDOM % 1000))` |
+| Download hangs/corrupts | Delete partial files, retry with longer timeout |
+| Error in installed package | Monkey patch in file.py, DON'T edit the package |
 
-STEP 4B: GPU CONTROL - UNDERSTAND FIRST, THEN ADAPT
+═══════════════════════════════════════════════════════════════
+TOOLS REFERENCE
+═══════════════════════════════════════════════════════════════
 
-🚨 CRITICAL: DON'T blindly modify scripts with sed! Understand what you're changing first.
+| Tool                        | When to Use                              |
+|-----------------------------|------------------------------------------|
+| read_file                   | Read README, scripts, config files       |
+| list_directory              | Explore repo structure                   |
+| execute_shell_command       | Run installation/training commands       |
+| search_log_errors           | Analyze log files for errors             |
+| search_error_solution       | Find solutions for specific errors       |
+| extract_experiment_metrics  | Parse results from output                |
+| compare_with_paper_results  | Validate reproduction accuracy           |
+|                             |                                          |
+| **NEW RESULT VERIFICATION TOOLS:**                           |
+| discover_result_files       | Find result files (JSON, CSV, TXT)       |
+| read_result_files           | Extract metrics from result files        |
+| read_log_tail               | Read last N lines of log (error check)   |
+| verify_experiment_results   | Complete verification workflow           |
+| get_experiment_checkpoint_status | Check if experiments can resume     |
+| generate_comparison_report  | Create detailed report comparing results |
 
-**Step 1: Check available GPUs**
-```bash
-gpu_count=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
-echo "Available GPUs: $gpu_count"
-```
+═══════════════════════════════════════════════════════════════
+⚠️  CRITICAL: RESULT VERIFICATION WORKFLOW (NEW!)
+═══════════════════════════════════════════════════════════════
 
-**Step 2: READ the script to understand how it controls GPUs**
-```bash
-cat script.sh | head -50  # Read the script first!
-```
+AFTER running experiments, ALWAYS follow this verification order:
 
-**Step 3: Identify the control method used:**
+1. **FIRST: Search for result files (NOT the log!)**
+   ```
+   discover_result_files(repo_path="/path/to/repo")
+   ```
+   Look for: results.json, eval_results.json, metrics.csv, scores.txt
 
-Look for these patterns in the script:
-- `accelerate launch` → Uses CUDA_VISIBLE_DEVICES (don't modify script!)
-- `torchrun` or `torch.distributed.launch` → Uses CUDA_VISIBLE_DEVICES (don't modify!)
-- `num_gpus=8` or `NGPU=8` → Script variable (use sed to change)
-- `--nproc_per_node=8` → CLI argument (modify command, not script)
-- Auto-detection with `torch.cuda.device_count()` → Don't modify anything!
+2. **SECOND: Extract metrics from result files**
+   ```
+   read_result_files(file_paths="/path/to/results.json,/path/to/eval.json")
+   ```
+   This extracts accuracy, F1, BLEU, loss, etc. from structured files.
 
-**Step 4: Choose the RIGHT method:**
+3. **THIRD: Only check log TAIL for errors (last 20-30 lines)**
+   ```
+   read_log_tail(log_path="/path/to/training.log", num_lines=30)
+   ```
+   Do NOT read the entire log file - it wastes context!
 
-**A) For accelerate/torchrun (MOST COMMON):**
-```bash
-# DON'T modify the script, just set environment variable:
-export CUDA_VISIBLE_DEVICES=0,1,2,3  # or 0,1 for 2 GPUs, etc.
-export MASTER_PORT=$((29500 + RANDOM % 1000))  # Prevent port conflicts
-bash script.sh
-```
+4. **FOURTH: Compare with paper results**
+   ```
+   comparison = compare_with_paper_results(extracted_metrics=..., expected_results_str="accuracy: 94.5%")
+   ```
 
-**B) For scripts with variables (e.g., num_gpus=8):**
-```bash
-# Only if you SEE "num_gpus=" or "NGPU=" in the script:
-sed -i "s/num_gpus=[0-9]*/num_gpus=$gpu_count/g" script.sh
-sed -i "s/nproc_per_node=[0-9]*/nproc_per_node=$gpu_count/g" script.sh
-bash script.sh
-```
+5. **FIFTH: Generate comparison report** (saves to file)
+   ```
+   generate_comparison_report(repo_path, extracted_metrics, paper_results, comparison)
+   ```
+   Creates `reproduction_report.md` with detailed comparison table.
 
-**C) For scripts with CLI arguments:**
-```bash
-# Modify the command, not the script:
-python train.py --num_gpus $gpu_count ...
-```
+OR use the all-in-one tool:
+   ```
+   verify_experiment_results(repo_path, paper_expected_results, experiment_log)
+   ```
 
-**❌ NEVER:**
-- Modify scripts without reading them first
-- Add flags that don't exist (e.g., `accelerate launch --num_gpus=4` is INVALID)
-- Use sed when environment variables are the correct method
+COMPARISON FEATURES:
+- **Fuzzy matching**: test_accuracy matches "accuracy", F1-score matches "f1"
+- **Value normalization**: 94.5% and 0.945 are treated as equal
+- **5% tolerance**: Values within 5% relative error are considered matching
+- **Partial success**: Reports "3/4 metrics matched" even if not all match
 
-**✅ ALWAYS:**
-- Read script first with `cat script.sh`
-- Identify the GPU control method
-- Use the appropriate control mechanism for that method
+⚠️  COMMON MISTAKES TO AVOID:
+   - ❌ Reading the entire log file (wastes context, misses result files)
+   - ❌ Ignoring result files saved by the experiment
+   - ❌ Re-running experiments that already completed successfully
+   - ❌ Not checking for checkpoints before starting experiments
 
-STEP 4C: Main Experiment
+✅ CORRECT WORKFLOW:
+   - ✅ FIRST check for existing result files
+   - ✅ ONLY read log tail (last 30 lines) for error checking
+   - ✅ Use get_experiment_checkpoint_status to check for resume points
+   - ✅ Resume from last checkpoint instead of starting over
 
-**Sequential Execution (CRITICAL):**
-- ⚠️ Run ONE experiment at a time - never multiple in parallel
-- Check if previous experiments still running before starting new ones
+═══════════════════════════════════════════════════════════════
+RESUME FROM CHECKPOINT (NEW!)
+═══════════════════════════════════════════════════════════════
 
-**FOREGROUND EXECUTION (CRITICAL - Agent must WAIT for results!):**
-Training takes hours. The agent MUST wait for experiments to complete!
+Before running any experiment, check if it can be resumed:
 
-🚨 CRITICAL: Run experiments in FOREGROUND so the agent waits for completion!
-- Use: `bash script.sh 2>&1 | tee output.log`
-- This runs in foreground AND captures output to file
-- The agent will wait until the experiment finishes
-- Default timeout is 30 minutes; for longer experiments use timeout parameter
+1. Check checkpoint status:
+   ```
+   get_experiment_checkpoint_status(repo_path="/path/to/repo")
+   ```
 
-❌ WRONG: `bash script.sh > output.log 2>&1 &`  (background - agent doesn't wait!)
-❌ WRONG: `bash script.sh &`  (background - loses all results!)
-✅ RIGHT: `bash script.sh 2>&1 | tee output.log`  (foreground - agent waits!)
-✅ RIGHT: `bash script.sh`  (foreground - agent waits, but no log file)
+2. If checkpoints exist, modify the training command to resume:
+   - HuggingFace: `--resume_from_checkpoint /path/to/checkpoint`
+   - PyTorch: `--resume checkpoint.pt`
+   - Custom: Check README for resume instructions
 
-For long experiments (>30 min), set explicit timeout in SECONDS:
-```python
-execute_shell_command(
-    command="bash script.sh 2>&1 | tee output.log",
-    timeout=7200  # 2 hours in SECONDS
-)
-```
+3. If no checkpoints but results exist → skip to verification
 
-After experiment completes, show results:
-- `tail -n 100 output.log` (shows final results/metrics)
-
-**Timeout Selection (in SECONDS):**
-- Small/demo: 1800 (30 min)
-- Medium (GLUE, SQuAD): 7200 (2 hours) - DEFAULT
-- Large (ImageNet, big models): 14400-28800 (4-8 hours)
-- Check README for time estimates and add buffer
-
-**ERROR DETECTION AND AUTO-FIX:**
-
-Check output for errors and FIX them:
-- **CUDA errors** → Fix CUDA_VISIBLE_DEVICES or reduce num_gpus
-- **ModuleNotFoundError** → Install missing package
-- **Out of memory** → Reduce batch size: `sed -i 's/batch_size=[0-9]*/batch_size=4/g' script.sh`
-- **Path errors** → Correct paths with sed
-
-⚠️ RETRY after fixing (max 3 attempts). Then try another experiment.
-
-**Success = produced metrics** (accuracy, loss, etc.), not just setup!
-
-**RESULT VERIFICATION (CRITICAL - DO AFTER EACH EXPERIMENT):**
-After EACH experiment completes:
-1. Read the output log: `tail -n 100 output.log`
-2. Extract metrics: `extract_experiment_metrics(output_text, expected_metrics_context)`
-3. Compare with paper: `compare_with_paper_results(extracted_metrics, paper_results, tolerance=0.05)`
-   - Uses RELATIVE error (5% = tolerance 0.05) - works for any metric scale
-   - Works for accuracy (0-1), BLEU (0-100), perplexity (10-1000), etc.
-
-Decision based on comparison result:
-- `success: True` → ✅ ALL metrics within 5% - Experiment SUCCEEDED! Report: "Experiment [name] completed successfully" and move to next.
-- `success_portion: "2/3"` → ⚠️ PARTIAL (2/3 metrics within 5%). Consider retry with fixes OR move to next.
-- `success: False` → ❌ FAILURE (0 or few metrics matched). Try to fix and retry (max 2 retries) OR move to next experiment.
-
-**IMPORTANT**: Explicitly report when experiment succeeds so it's tracked properly.
-If you cannot fix after 2 retries → Report blocker → Move to next experiment OR stop if no more experiments.
-
-**🎯 STRATEGIC CHECKPOINT - Every 5 Experiment Attempts:**
-Pause and assess progress:
-```
-Question 1: "Am I making progress toward running experiments?"
-   YES → Continue with current approach
-   NO  → Check: Have I been retrying the same failing experiment 5+ times?
-         If YES: Use search_error_solution → Try different experiment → Report blocker
-
-Question 2: "Have I successfully run ANY experiment (even a simple one)?"
-   YES → Focus on main experiments from paper
-   NO  → Am I stuck on same error 3+ times?
-         If YES: Document blocker → Try simpler/different experiment
-
-Question 3: "Are experiments producing output/metrics?"
-   YES → Excellent! Extract metrics and compare with paper
-   NO  → Is setup actually working? Try simplest possible test first
-```
-
-**🎯 META-COGNITIVE RULE - Global Progress Check:**
-At iterations 15, 30, 45 (every 15 iterations), MANDATORY reflection:
-```
-1. What phase am I in? (Setup / Data / Experiments)
-2. How many times have I failed at this phase?
-3. Am I stuck in a retry loop?
-4. What's my next DIFFERENT approach if current one fails?
-5. Should I move to next phase with partial success?
-```
-
-If stuck for 10+ iterations on same phase:
-   → Document blocker clearly
-   → Move to next phase OR try completely different approach
-   → Do NOT retry same variations endlessly
-
-RESOURCE-AWARE EXECUTION:
-Based on detected resources, adjust experiment execution:
+═══════════════════════════════════════════════════════════════
+RESOURCE-AWARE EXECUTION
+═══════════════════════════════════════════════════════════════
 
 {resource_instructions}
 
 ═══════════════════════════════════════════════════════════════
-NESTED READMEs - CRITICAL!
+PROGRESS CHECKPOINTS (Every 15 iterations)
 ═══════════════════════════════════════════════════════════════
-READMEs often reference subdirectories with their own instructions:
-- "See X/ for details"
-- "Refer to X/README.md"
-- "Follow instructions in examples/X/"
-- "Each subdirectory has its own setup"
 
-WORKFLOW FOR NESTED READMEs:
-1. Identify the subdirectory path mentioned (e.g., "examples/NLU", "src/model", etc.)
-2. Read nested README: read_file("<repo>/<subdirectory>/README.md")
-3. Extract commands from that nested README
-4. Execute commands with cwd="<repo>/<subdirectory>" (CRITICAL: use the subdirectory as working dir!)
-5. Commands in nested READMEs assume you're running FROM that directory
+Ask yourself:
+1. What phase am I in? Am I making progress?
+2. Am I stuck in a retry loop? (Same error 3+ times = stuck)
+3. Should I move forward with partial success?
 
-KEY INSIGHT: Nested READMEs often contain the ACTUAL detailed setup/experiment commands!
+Decision: If stuck for 10+ iterations → document blocker → move to next phase
 
 ═══════════════════════════════════════════════════════════════
-REPORTING & LEARNING FROM ERRORS
+FINAL REPORT SHOULD INCLUDE
 ═══════════════════════════════════════════════════════════════
-After each phase, report:
-✅ What you did
-✅ What succeeded / failed
-✅ **What you learned from failures**
-✅ **How many retry attempts were needed**
-✅ **Which error search/diagnosis tools you used**
-✅ What you'll do next
 
-Final report should include:
-- All READMEs you read (root + nested)
-- Setup result (success/failure + retry count)
+- READMEs consulted (root + nested)
+- Setup result (success/failure + what was installed)
 - Data preparation result (location or manual steps needed)
-- Experiment results (commands run + output)
-- **Blockers encountered and strategies tried**
-- **Whether error search tools were used effectively**
+- Experiments run (commands + metrics obtained)
+- **RESULT FILES FOUND** (where results were saved)
+- **EXTRACTED METRICS** (from result files, not just logs)
+- Comparison with paper results (% match)
+- Any blockers encountered
+- **CHECKPOINT STATUS** (for resuming if needed)
 
-**REPORT BLOCKERS CLEARLY:**
-When something cannot be completed after reasonable attempts:
-```
-BLOCKER: [Phase] - [Specific Error]
-Attempts: [X] different approaches tried
-Strategies used: [list what you tried]
-Error searches: [Yes/No - did you use search_error_solution?]
-Impact: [Can proceed with partial setup / Cannot proceed / Trying alternative]
-Next action: [Moving to next phase / Trying fundamentally different approach]
-```
-
-═══════════════════════════════════════════════════════════════
-CRITICAL RULES (MANDATORY - NO EXCEPTIONS!)
-═══════════════════════════════════════════════════════════════
-1. READ README FIRST - don't guess!
-2. Follow instructions in order
-3. Search for and read nested READMEs when referenced
-4. Start with simple/quickstart examples
-5. **USE search_error_solution after 2nd failure of same error**
-6. **DETECT when stuck (3+ similar attempts) → change approach**
-7. **STRATEGIC CHECKPOINTS: Reflect after each phase and every 15 iterations**
-8. Don't proceed to next phase if current phase failed critically
-9. Report clearly at each step (including retry counts and strategies)
-10. Maximum {max_iterations} tool calls - be efficient and strategic!
-
-**EFFICIENCY PRINCIPLES:**
-- One error, one diagnosis → Don't retry blindly
-- Stuck detection → Change approach, don't loop
-- Use diagnostic tools → They exist for a reason
-- Document blockers → Move forward with partial success
-- Think strategically → Ask "Is this working?" every 5 iterations
+Maximum {max_iterations} tool calls - be efficient and strategic!
 """
 
         tools = [
@@ -618,6 +376,16 @@ CRITICAL RULES (MANDATORY - NO EXCEPTIONS!)
             search_error_solution,
             extract_experiment_metrics,
             compare_with_paper_results,
+            # New result discovery and verification tools
+            discover_result_files,
+            read_result_files,
+            read_log_tail,
+            verify_experiment_results,
+            get_experiment_checkpoint_status,
+            generate_comparison_report,
+            # Smart extraction tools for custom formats (e.g., poly 0.3 0.001 92.32 $\pm$ nan)
+            smart_extract_results,
+            align_and_compare_results,
         ]
 
         # Use ReAct agent with native tool calling
@@ -791,18 +559,28 @@ Experiment Strategy: {self.experiment_strategy.upper()}
 BEGIN WORKFLOW
 ═══════════════════════════════════════════════════════════════
 
-Start by reading the root README.md:
+**IMPORTANT: Check for existing results FIRST!**
+→ get_experiment_checkpoint_status(repo_path="{code_path}")
+→ discover_result_files(repo_path="{code_path}")
+
+If results already exist → Skip to verification (Phase 5)
+If checkpoints exist → Resume from checkpoint
+
+Otherwise, start by reading the root README.md:
 → read_file(file_path="{code_path}/README.md")
 
 Then identify and execute the workflow:
 1. Environment Setup
 2. Dataset Preparation
 3. Run Experiments (Sanity Check → Main Experiment)
+4. **VERIFY RESULTS** (discover_result_files → read_result_files → compare_with_paper_results)
 
 Remember:
 - Search for nested READMEs if mentioned
 - Follow README instructions explicitly
 - Report progress after each phase
+- **After experiments: Search for RESULT FILES first, not log files!**
+- **Only read log TAIL (last 20-30 lines) for error checking**
 - Stop if critical phase fails
 """
 
@@ -952,6 +730,14 @@ Remember:
             # READMEs
             "readmes_consulted": [],
             "nested_readmes_found": [],
+
+            # NEW: Result Verification
+            "result_files_found": [],  # NEW: Result files discovered
+            "result_files_used": [],   # NEW: Files used for verification
+            "extracted_metrics": {},   # NEW: Metrics extracted from result files
+            "verification_status": "", # NEW: "verified", "partial", "failed", "not_run"
+            "checkpoints_found": [],   # NEW: Checkpoints for resume
+            "can_resume": False,       # NEW: Whether experiment can be resumed
 
             # Output
             "experiment_output": "",
@@ -1147,6 +933,53 @@ Remember:
             if any(kw in msg.lower() for kw in ["error", "failed", "exception"]) and "no error" not in msg.lower():
                 reproduction_info["errors"].append(msg[:200])
 
+        # NEW: Detect result verification from messages
+        for msg in all_messages:
+            msg_lower = msg.lower()
+
+            # Detect result files found
+            if "discover_result_files" in msg_lower or "result files" in msg_lower:
+                # Look for file paths
+                file_matches = re.findall(r'[\w/\-\.]+\.(?:json|csv|txt)', msg, re.IGNORECASE)
+                for f in file_matches[:5]:
+                    if f not in reproduction_info["result_files_found"]:
+                        reproduction_info["result_files_found"].append(f)
+
+            # Detect metrics extraction
+            if "extracted metrics" in msg_lower or "read_result_files" in msg_lower:
+                # Look for metric patterns like "accuracy: 0.95"
+                metric_matches = re.findall(r'(\w+)\s*[:=]\s*(\d+\.?\d*)', msg, re.IGNORECASE)
+                for name, value in metric_matches[:10]:
+                    try:
+                        reproduction_info["extracted_metrics"][name.lower()] = float(value)
+                    except ValueError:
+                        pass
+
+            # Detect checkpoint status
+            if "checkpoint" in msg_lower:
+                checkpoint_matches = re.findall(r'(checkpoint[_\-]?\d+|epoch[_\-]?\d+)', msg, re.IGNORECASE)
+                for ckpt in checkpoint_matches[:5]:
+                    if ckpt not in reproduction_info["checkpoints_found"]:
+                        reproduction_info["checkpoints_found"].append(ckpt)
+                if "can_resume" in msg_lower or "resume from" in msg_lower:
+                    reproduction_info["can_resume"] = True
+
+            # Detect verification status
+            if "verify_experiment_results" in msg_lower or "compare_with_paper" in msg_lower:
+                if "verified" in msg_lower and "success" in msg_lower:
+                    reproduction_info["verification_status"] = "verified"
+                elif "partial" in msg_lower:
+                    reproduction_info["verification_status"] = "partial"
+                elif "failed" in msg_lower or "mismatch" in msg_lower:
+                    reproduction_info["verification_status"] = "failed"
+
+        # Set verification status if not already set
+        if not reproduction_info["verification_status"]:
+            if reproduction_info["extracted_metrics"]:
+                reproduction_info["verification_status"] = "partial"
+            else:
+                reproduction_info["verification_status"] = "not_run"
+
         # Generate final report
         if all_messages:
             # Use last message as summary, or create one
@@ -1174,6 +1007,32 @@ Remember:
 
             report_parts.append(f"  Sanity Check: {'✅ Passed' if reproduction_info['sanity_check_passed'] else '❌ Failed' if reproduction_info['sanity_check_attempted'] else '⚠️  Not run'}")
             report_parts.append(f"  Main Experiment: {'✅ Success' if reproduction_info['main_experiment_successful'] else '❌ Failed' if reproduction_info['main_experiment_attempted'] else '⚠️  Not run'}")
+
+            # NEW: Result Verification Section
+            report_parts.append(f"\nResult Verification:")
+            if reproduction_info["result_files_found"]:
+                report_parts.append(f"  Result Files Found: {len(reproduction_info['result_files_found'])}")
+                for f in reproduction_info["result_files_found"][:3]:
+                    report_parts.append(f"    → {f}")
+
+            if reproduction_info["extracted_metrics"]:
+                report_parts.append(f"  Extracted Metrics: {len(reproduction_info['extracted_metrics'])}")
+                for key, val in list(reproduction_info["extracted_metrics"].items())[:5]:
+                    report_parts.append(f"    {key}: {val}")
+
+            verification_status_display = {
+                "verified": "✅ VERIFIED - Results match paper!",
+                "partial": "⚠️  PARTIAL - Some metrics matched",
+                "failed": "❌ FAILED - Results don't match paper",
+                "not_run": "⚠️  NOT RUN - Verification not completed"
+            }
+            report_parts.append(f"  Verification: {verification_status_display.get(reproduction_info['verification_status'], '⚠️  Unknown')}")
+
+            if reproduction_info["checkpoints_found"]:
+                report_parts.append(f"\nCheckpoints Found: {len(reproduction_info['checkpoints_found'])}")
+                report_parts.append(f"  Can Resume: {'Yes' if reproduction_info['can_resume'] else 'No'}")
+                for ckpt in reproduction_info["checkpoints_found"][:3]:
+                    report_parts.append(f"    → {ckpt}")
 
             if reproduction_info["executed_commands"]:
                 report_parts.append(f"\nCommands Executed:")

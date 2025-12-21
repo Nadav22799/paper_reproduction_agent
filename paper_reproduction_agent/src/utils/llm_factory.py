@@ -1,74 +1,18 @@
-"""LLM Factory - Automatically select and configure LLM based on available API keys."""
+"""LLM Factory - Automatically select and configure LLM based on available API keys.
+
+Simplified version that treats all providers (including local vLLM) the same way.
+No special wrappers needed - just configure vLLM server with tool calling support.
+
+To use local vLLM:
+1. Start vLLM: vllm serve MODEL --enable-auto-tool-choice --tool-call-parser hermes
+2. Set in .env:
+   - OPENAI_API_KEY=not-needed
+   - OPENAI_API_BASE=http://localhost:8000/v1
+   - LLM_MODEL=your-model-name
+"""
 
 import os
-import re
-from typing import Optional, Any, List
-from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.runnables import RunnableConfig
-
-
-def clean_special_tokens(content: str) -> str:
-    """Remove special tokens from content."""
-    if not content:
-        return content
-    # Remove <think>...</think> blocks
-    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-    # Remove <tool_call>...</tool_call> blocks
-    content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL)
-    # Clean up extra whitespace
-    content = re.sub(r'\n\s*\n', '\n\n', content).strip()
-    return content
-
-
-class CleanContentChatOpenAI:
-    """Wrapper for ChatOpenAI that cleans special tokens from content."""
-
-    def __init__(self, base_llm):
-        self.base_llm = base_llm
-        # Expose all base_llm methods
-        for attr in dir(base_llm):
-            if not attr.startswith('_') and attr not in ['invoke', 'generate', '_generate']:
-                setattr(self, attr, getattr(base_llm, attr))
-
-    def invoke(self, input, config=None, **kwargs):
-        """Invoke with content cleaning."""
-        result = self.base_llm.invoke(input, config, **kwargs)
-        if hasattr(result, 'content') and result.content:
-            result.content = clean_special_tokens(result.content)
-        return result
-
-    def generate(self, messages, stop=None, callbacks=None, **kwargs):
-        """Generate with content cleaning."""
-        result = self.base_llm.generate(messages, stop, callbacks, **kwargs)
-        for generations in result.generations:
-            for gen in generations:
-                if hasattr(gen, 'message') and hasattr(gen.message, 'content'):
-                    if gen.message.content:
-                        gen.message.content = clean_special_tokens(gen.message.content)
-        return result
-
-    def stream(self, input, config=None, **kwargs):
-        """Stream with content cleaning."""
-        for chunk in self.base_llm.stream(input, config, **kwargs):
-            if hasattr(chunk, 'content') and chunk.content:
-                chunk.content = clean_special_tokens(chunk.content)
-            yield chunk
-
-    def bind_tools(self, tools, **kwargs):
-        """Bind tools - delegate to base LLM and wrap the result."""
-        bound_llm = self.base_llm.bind_tools(tools, **kwargs)
-        # Return a wrapped version so cleaning continues to work
-        return CleanContentChatOpenAI(bound_llm)
-
-    def with_structured_output(self, schema, **kwargs):
-        """Support structured output - delegate to base LLM."""
-        structured_llm = self.base_llm.with_structured_output(schema, **kwargs)
-        return CleanContentChatOpenAI(structured_llm)
-
-    def __getattr__(self, name):
-        """Delegate unknown attributes to base_llm."""
-        return getattr(self.base_llm, name)
+from typing import Optional
 
 
 def create_llm(temperature: float = 0.1):
@@ -184,7 +128,7 @@ def create_llm(temperature: float = 0.1):
             print(f"   Model: {os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-exp')}")
             print("   Falling back to other providers...")
 
-    # Check for OpenAI (prioritize if available)
+    # Check for OpenAI or local vLLM (OpenAI-compatible)
     openai_key = os.getenv("OPENAI_API_KEY")
     if openai_key:
         from langchain_openai import ChatOpenAI
@@ -192,7 +136,7 @@ def create_llm(temperature: float = 0.1):
         model = os.getenv("LLM_MODEL", "gpt-4-turbo-preview")
         base_url = os.getenv("OPENAI_API_BASE")  # Support local vLLM server
 
-        # Make max_tokens configurable - GPT-OSS harmony format may need different limits
+        # Make max_tokens configurable
         max_tokens_config = os.getenv("LLM_MAX_TOKENS")
         max_tokens = int(max_tokens_config) if max_tokens_config else None
 
@@ -200,48 +144,26 @@ def create_llm(temperature: float = 0.1):
             "openai_api_key": openai_key,
             "model": model,
             "temperature": temperature,
-            "base_url": base_url,
         }
+
+        if base_url:
+            llm_kwargs["base_url"] = base_url
 
         if max_tokens is not None:
             llm_kwargs["max_tokens"] = max_tokens
 
-        base_llm = ChatOpenAI(**llm_kwargs)
+        llm = ChatOpenAI(**llm_kwargs)
 
+        # Log which provider we're using
         if base_url:
-            print(f"🖥️  Using Local vLLM Server (OpenAI-compatible) with {model}")
+            print(f"🖥️  Using Local vLLM Server with {model}")
             print(f"   Base URL: {base_url}")
-            if max_tokens is not None:
-                print(f"   Max tokens: {max_tokens}")
-            else:
-                print(f"   Max tokens: None (using vLLM server defaults)")
-
-            # Check if wrapping should be disabled
-            disable_wrapper = os.getenv("DISABLE_VLLM_WRAPPER", "false").lower() == "true"
-
-            if disable_wrapper:
-                print(f"   VLLMMultiTurnWrapper DISABLED (DISABLE_VLLM_WRAPPER=true)")
-                print(f"   Using base ChatOpenAI directly")
-                return base_llm
-
-            # Wrap with multi-turn wrapper for vLLM
-            from .vllm_wrapper import VLLMMultiTurnWrapper
-            debug_mode = os.getenv("VLLM_DEBUG", "false").lower() == "true"
-            enable_recovery = os.getenv("VLLM_ENABLE_RECOVERY", "true").lower() == "true"
-
-            if debug_mode:
-                print(f"   Debug mode enabled (VLLM_DEBUG=true)")
-
-            if enable_recovery:
-                print(f"   Empty response recovery enabled (will attempt to fix empty responses after tool calls)")
-            else:
-                print(f"   Empty response recovery disabled (faster but may fail on empty responses)")
-
-            print(f"   Wrapping with VLLMMultiTurnWrapper")
-            return VLLMMultiTurnWrapper(base_llm, debug=debug_mode, enable_recovery=enable_recovery)
+            print(f"   Works like OpenAI API - no wrapper needed!")
+            print(f"   Make sure vLLM is started with: --enable-auto-tool-choice --tool-call-parser hermes")
         else:
             print(f"🤖 Using OpenAI with {model}")
-            return base_llm
+
+        return llm
 
     # Check for Groq second (fast and free alternative)
     groq_key = os.getenv("GROQ_API_KEY")
