@@ -2,7 +2,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Build Status](https://img.shields.io/github/actions/workflow/status/Nadav22799/paper_reproduction_agent/ci.yml)
+![Build Status](https://github.com/Nadav22799/paper_reproduction_agent/actions/workflows/ci.yml/badge.svg)
 
 **An Autonomous AI Agent that reads research papers, clones their code, and scientifically verifies their results.**
 
