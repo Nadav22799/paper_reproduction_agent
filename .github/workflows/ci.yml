@@ -3,14 +3,9 @@ name: Paper Reproduction Agent CI
 on:
   push:
     branches: [ "main" ]
-    paths:
-      - 'paper_reproduction_agent/**'
-      - '.github/workflows/ci.yml'
   pull_request:
     branches: [ "main" ]
-    paths:
-      - 'paper_reproduction_agent/**'
-      - '.github/workflows/ci.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
