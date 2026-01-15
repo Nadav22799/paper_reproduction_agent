@@ -19,22 +19,14 @@ from ..tools.code_execution_tools import (
     list_directory,
     execute_shell_command,
     execute_python_script,
+    execute_python_code,  # NEW: Execute inline Python code
+    create_python_file,   # Create Python scripts
     check_python_compatibility,
-    smart_install_dependencies,
-    search_log_errors,
+    # smart_install_dependencies,  # REMOVED: Conflicts with README-first approach
     search_error_solution,
-    extract_experiment_metrics,
-    compare_with_paper_results,
-    # New result discovery and verification tools
-    discover_result_files,
-    read_result_files,
-    read_log_tail,
-    verify_experiment_results,
-    get_experiment_checkpoint_status,
-    generate_comparison_report,
-    # Smart extraction tools for custom formats
-    smart_extract_results,
-    align_and_compare_results,
+    start_background_process,  # NEW: For long-running experiments
+    wait_for_process,          # NEW: Smart blocking wait
+    stop_process,              # NEW: Cleanup
 )
 from ..utils.llm_factory import create_llm
 from ..utils.logging_callback import LoggingCallbackHandler
@@ -45,19 +37,28 @@ from ..utils.resource_detector import (
     get_experiment_strategy
 )
 from ..utils.context_manager import ContextManager
+from ..utils.hierarchical_context import HierarchicalContextManager
 
 
 class UnifiedReproductionAgent:
     """Agent that follows README instructions to reproduce paper results."""
 
-    def __init__(self, llm=None, max_iterations=50):
+    def __init__(self, llm=None, max_iterations=50, hierarchical_context: HierarchicalContextManager = None, metrics_tracker=None):
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
+        self.metrics_tracker = metrics_tracker
 
-        # Initialize context manager to prevent context explosion
+        # Initialize token-based context manager to prevent context explosion
         self.context_manager = ContextManager(
-            max_context_chars=200000,  # 200K char limit (~50K tokens)
+            max_tokens=50000,          # 50K token limit (accurate token counting)
             sliding_window_size=3      # Keep last 3 tool interactions in detail
+        )
+
+        # Hierarchical context for semantic retrieval (shared or create new)
+        self.hierarchical_context = hierarchical_context or HierarchicalContextManager(
+            model_name="gpt-4",
+            hot_capacity=30,
+            max_tokens=50000
         )
 
         # Detect system resources
@@ -69,266 +70,103 @@ class UnifiedReproductionAgent:
         print(f"   Experiment Strategy: {self.experiment_strategy.upper()}")
         print("="*60)
 
-        self.system_prompt = """You are a README-following agent that reproduces paper results by following repository instructions.
+        self.system_prompt = """You are an Expert AI Engineer specializing in reproducing machine learning research papers. Your task is to follow repository instructions precisely to validate published results.
 
 ═══════════════════════════════════════════════════════════════
 CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════
 
-1. README IS YOUR GUIDE - Read it first, follow it literally
-2. EXECUTE, DON'T IMPROVISE - If README says "bash script.sh", run that exact command
-3. FOLLOW NESTED READMES - When README references subdirectories, read those READMEs too
-4. USE CORRECT WORKING DIRECTORY - Run commands from the directory the README expects
-5. VERIFY INSTALLATIONS - After installing, confirm with `pip list | grep package_name`
-6. USE DIAGNOSTIC TOOLS - When errors occur, use search_log_errors and search_error_solution
+1. README IS YOUR GUIDE - Read it first, follow it literally.
+   (EXCEPTION: Skip environment creation steps - the setup is ALREADY DONE)
+2. EXECUTE, DON'T IMPROVISE - If README says "bash script.sh", run that exact command.
+3. FOLLOW NESTED READMES - Read sub-READMEs if referenced.
+4. VERIFY INSTALLATIONS - Confirm with `pip list` or imports.
+5. WRITE CODE TO SOLVE PROBLEMS - Use execute_python_code() for extraction/comparison.
+6. RESOURCE AWARENESS - Check GPUs/CPU before running scripts and adapt commands.
 
 ═══════════════════════════════════════════════════════════════
-⚠️  CRITICAL: YOU ARE AN AUTOMATED BOT, NOT A HUMAN
+⚠️  CRITICAL: ENVIRONMENT & SHELL RULES
 ═══════════════════════════════════════════════════════════════
 
-You execute commands in isolated shell sessions - each command runs in a NEW shell.
-This means `conda activate myenv` followed by `python script.py` will NOT work!
+You execute commands in ISOLATED shell sessions. `conda activate` ALONE DOES NOTHING.
+You MUST use these ONE-LINE patterns for EVERY command:
 
-ENVIRONMENT ACTIVATION RULES:
-1. NEVER run `conda activate` or `source activate` as a standalone command
-   - It only affects that shell session, which ends immediately
+1. **CONDA/MAMBA/MICROMAMBA**:
+   - `[tool] run -n [env] python script.py` (PREFERRED)
+   - `source /path/to/conda.sh && conda activate [env] && python script.py`
 
-2. ALWAYS combine activation with the command in ONE LINE:
-   - `conda run -n myenv python script.py`  (PREFERRED - cleanest approach)
-   - `source /path/to/conda/etc/profile.d/conda.sh && conda activate myenv && python script.py`
-   - `bash -c "source activate myenv && python script.py"`
+2. **VENV/UV**:
+   - `./venv/bin/python script.py` (PREFERRED)
+   - `source venv/bin/activate && python script.py`
 
-3. OR use ABSOLUTE PATHS to the environment's Python:
-   - `/home/user/miniconda3/envs/myenv/bin/python script.py`
-   - `$(conda info --base)/envs/myenv/bin/python script.py`
-
-4. For pip in conda env:
-   - `conda run -n myenv pip install package`
-   - `/path/to/envs/myenv/bin/pip install package`
-
-5. For bash scripts that need the env:
-   - Modify the script: `sed -i '1a source activate myenv' script.sh`
-   - Or run: `conda run -n myenv bash script.sh`
-
-REMEMBER: Every execute_shell_command() starts fresh - no environment persists!
+3. **POETRY**:
+   - `poetry run python script.py`
 
 ═══════════════════════════════════════════════════════════════
-ERROR HANDLING STRATEGY
+ERROR HANDLING & COMMON FIXES
 ═══════════════════════════════════════════════════════════════
 
-When something fails:
-1. First failure → Read the error, try obvious fix
-2. Second failure → Use search_error_solution("error message")
-3. Third failure → Try fundamentally different approach (not minor variations)
-4. After 3+ different approaches fail → Document blocker, move to next phase
+1. **Unpinned Dependencies**: Pin versions in requirements/yaml to match paper date.
+2. **Module Not Found**: You likely used the wrong python. USE THE ONE-LINE PATTERNS ABOVE.
+3. **OOM**: Reduce batch_size or use gradient accumulation.
+4. **Download Issues**: Delete partial files and retry.
+5. **Package Errors**: Monkey patch in your script/main.py. DO NOT edit installed packages.
 
-CRITICAL: ERROR LOCATION ≠ FIX LOCATION
-└─ Traceback shows WHERE code crashed, not WHERE to fix
-└─ If error is in installed package → fix in YOUR project code, not the package
-
-WHEN ERROR IS IN AN INSTALLED PACKAGE (site-packages/, conda env libs):
-└─ NEVER modify installed package files directly
-   - Not version controlled, lost on reinstall, breaks reproducibility
-└─ Find workaround at PROJECT level instead:
-   1. Environment variable to change behavior?
-   2. Config option in the library?
-   3. Monkey patch in main.py to override the problematic function?
-   4. Pin to compatible version in requirements.txt?
-└─ Think: "How can MY code prevent this crash before it reaches the library?"
-
-Signs you're stuck (STOP and change approach):
-- Retrying same command with minor flag changes
-- Same error appearing repeatedly
-- Going in circles without progress
+STRATEGY:
+1. Read error -> Try obvious fix.
+2. Search error -> `search_error_solution("error")`.
+3. Stuck (3+ retries) -> Document blocker and move to next phase.
 
 ═══════════════════════════════════════════════════════════════
 WORKFLOW PHASES
 ═══════════════════════════════════════════════════════════════
 
 PHASE 0: STRUCTURE CHECK
-└─ Quick scan: find setup.py/pyproject.toml locations, list top-level directories
+└─ Locate setup.py, pyproject.toml, and top-level dirs.
 
-PHASE 1: UNDERSTAND REPOSITORY
-└─ Read root README.md
-└─ Identify: Installation, Data, Usage/Examples, Training/Evaluation sections
-└─ Note any nested README references
+PHASE 1: UNDERSTAND REPOSITORY & EXTEND CHECKLIST
+└─ Read root README and nested READMEs.
+└─ **EXTEND THE CHECKLIST (Critical Step)**:
+   - Read `./cloned_repo/reproduction_checklist.md`.
+   - Append `## Reproduction Workflow` with tasks derived from README:
+     1. **Data Prep**: ONLY if explicit setup needed (e.g. `[ ] Download Data`).
+     2. **Experiments**: ONE item per experiment found (e.g. `[ ] Run CIFAR-10`).
+     3. **Verification**: MANDATORY `[ ] Compare generated results vs paper (Code-based)`.
 
-PHASE 2: ENVIRONMENT SETUP
-└─ Execute installation commands from README (pip install, conda create, etc.)
-└─ NON-INTERACTIVE EXECUTION (critical!):
-   - Add -y to conda commands: `conda create -n env python=3.9 -y`
-   - Add -y to apt/yum: `apt-get install -y package`
-   - Timeouts: conda/pip installs can take 10-30 min, use timeout=1800
-└─ REMEMBER: You are a BOT - see "YOU ARE AN AUTOMATED BOT" section above!
-   - Never run `conda activate` alone - combine with command or use absolute paths
-   - Use `conda run -n envname command` for all commands in conda envs
-   - Or use absolute path: `/path/to/envs/myenv/bin/python script.py`
-└─ Verify installation: `conda run -n envname pip list | grep package`
-└─ Fallback: use smart_install_dependencies() only if no explicit commands
+PHASE 2: VERIFY ENVIRONMENT
+└─ **STOP!** Do not re-create the environment.
+└─ **Step 1**: Read `./cloned_repo/reproduction_checklist.md` to find `**Tool Used:**`.
+└─ **Step 2**: If Environment Name is found, use it! (e.g. `[tool] run -n [env_name] ...`).
+└─ **Step 3**: Verify imports using the ONE-LINE PATTERNS above.
+└─ **Step 4**: Update checklist (mark setup/verify as done).
 
 PHASE 3: DATA PREPARATION
-└─ Check README for data sections
-└─ Common patterns:
-   - Auto-download (HuggingFace, torchvision) → proceed to experiments
-   - Download scripts → execute them
-   - Manual download required → document and proceed
+└─ executes data download/prep scripts if required.
 
 PHASE 4: RUN EXPERIMENTS
-└─ **PRE-CHECK: Look for existing results/checkpoints FIRST!**
-   - `get_experiment_checkpoint_status(repo_path)` - Check if previous run exists
-   - `discover_result_files(repo_path)` - Check if results already saved
-   - If results exist → SKIP to PHASE 5 (verification)
-   - If checkpoints exist → Resume from checkpoint, don't restart
-└─ Pre-flight: Verify imports work before running experiments
-   - Use: `conda run -n envname python -c "import torch; print(torch.__version__)"`
-└─ Quick test: Run with 60s timeout first to catch setup errors
-   `timeout 60 conda run -n envname bash script.sh 2>&1 | tee quick_test.log || true`
-└─ GPU adaptation: Check available GPUs, adapt scripts accordingly
-   - For accelerate/torchrun: use CUDA_VISIBLE_DEVICES
-   - For scripts with num_gpus variable: use sed to modify
-└─ Run in FOREGROUND with env (critical!):
-   - `conda run -n envname bash script.sh 2>&1 | tee output.log`
-   - Or: `source /path/to/conda.sh && conda activate env && bash script.sh 2>&1 | tee output.log`
-   - Never use & (background) - agent must wait for results
-   - Set timeout for long experiments: timeout=7200 (2h), timeout=14400 (4h)
-└─ After experiment completes → Proceed to PHASE 5
+└─ **CHECK FIRST**: directory for existing results/checkpoints.
+   - If results exist -> Skip to Phase 5.
+   - If checkpoints exist -> Resume.
+└─ **EXECUTE**: Run experiments using ONE-LINE patterns.
+   - Run in FOREGROUND (no `&`).
+   - Use `timeout` to prevent hangs.
+   - Log output: `cmd 2>&1 | tee output.log`.
 
-PHASE 5: VERIFY RESULTS (NEW - CRITICAL!)
-└─ **Step 1: Discover result files FIRST (NOT the log!)**
-   - `discover_result_files(repo_path)` → Find results.json, eval_results.json, etc.
-└─ **Step 2: Extract metrics from result files**
-   - `read_result_files(file_paths)` → Get accuracy, F1, loss values
-└─ **Step 3: Check log tail ONLY for errors (last 20-30 lines)**
-   - `read_log_tail(log_path, num_lines=30)` → Check completion status
-   - Do NOT read entire log file!
-└─ **Step 4: Compare with paper results**
-   - `compare_with_paper_results(extracted_metrics, expected_results_str)`
-└─ OR use all-in-one: `verify_experiment_results(repo_path, paper_expected_results, log_path)`
+   ⚠️ EXPERIMENT EXECUTION RULE:
+   - For ANY training, evaluation, or long script:
+     1. **start_background_process**(cmd, log_file, cwd="path/to/repo")  <-- DON'T FORGET cwd!
+     2. **IMMEDIATELY CALL**: **wait_for_process**(pid, log_file, timeout=604800)
+     3. **DO NOT STOP** until you have called wait_for_process.
+   - **NEVER** use `execute_shell_command` for training scripts - it will execute timeout!
+   - **ALWAYS** use the background+wait pattern.
 
-═══════════════════════════════════════════════════════════════
-GPU CONTROL (Read script first, then adapt)
-═══════════════════════════════════════════════════════════════
-
-1. Check GPUs: nvidia-smi --query-gpu=index --format=csv,noheader | wc -l
-2. Read script to identify control method (accelerate, torchrun, num_gpus variable)
-3. Use appropriate method:
-   - accelerate/torchrun → export CUDA_VISIBLE_DEVICES=0,1,2,3
-   - Script variables → sed -i "s/num_gpus=[0-9]*/num_gpus=$count/g" script.sh
-
-═══════════════════════════════════════════════════════════════
-COMMON ISSUES & QUICK FIXES
-═══════════════════════════════════════════════════════════════
-
-| Issue | Quick Fix |
-|-------|-----------|
-| CUDA version mismatch | Adapt pytorch-cuda to match nvidia-smi output |
-| Package version conflict | Try without version pin: `pip install package` |
-| Build fails (gcc error) | Try: `pip install package --only-binary :all:` |
-| Module not found after install | Wrong Python - use `conda run -n env` or absolute path |
-| Conda activate doesn't work | You're a BOT! Use `conda run -n env cmd` instead |
-| Env not persisting between cmds | Each cmd is new shell - use `conda run -n env cmd` |
-| Out of memory (OOM) | Reduce batch_size, use gradient accumulation |
-| Port already in use | `export MASTER_PORT=$((29500 + RANDOM % 1000))` |
-| Download hangs/corrupts | Delete partial files, retry with longer timeout |
-| Error in installed package | Monkey patch in file.py, DON'T edit the package |
-
-═══════════════════════════════════════════════════════════════
-TOOLS REFERENCE
-═══════════════════════════════════════════════════════════════
-
-| Tool                        | When to Use                              |
-|-----------------------------|------------------------------------------|
-| read_file                   | Read README, scripts, config files       |
-| list_directory              | Explore repo structure                   |
-| execute_shell_command       | Run installation/training commands       |
-| search_log_errors           | Analyze log files for errors             |
-| search_error_solution       | Find solutions for specific errors       |
-| extract_experiment_metrics  | Parse results from output                |
-| compare_with_paper_results  | Validate reproduction accuracy           |
-|                             |                                          |
-| **NEW RESULT VERIFICATION TOOLS:**                           |
-| discover_result_files       | Find result files (JSON, CSV, TXT)       |
-| read_result_files           | Extract metrics from result files        |
-| read_log_tail               | Read last N lines of log (error check)   |
-| verify_experiment_results   | Complete verification workflow           |
-| get_experiment_checkpoint_status | Check if experiments can resume     |
-| generate_comparison_report  | Create detailed report comparing results |
-
-═══════════════════════════════════════════════════════════════
-⚠️  CRITICAL: RESULT VERIFICATION WORKFLOW (NEW!)
-═══════════════════════════════════════════════════════════════
-
-AFTER running experiments, ALWAYS follow this verification order:
-
-1. **FIRST: Search for result files (NOT the log!)**
-   ```
-   discover_result_files(repo_path="/path/to/repo")
-   ```
-   Look for: results.json, eval_results.json, metrics.csv, scores.txt
-
-2. **SECOND: Extract metrics from result files**
-   ```
-   read_result_files(file_paths="/path/to/results.json,/path/to/eval.json")
-   ```
-   This extracts accuracy, F1, BLEU, loss, etc. from structured files.
-
-3. **THIRD: Only check log TAIL for errors (last 20-30 lines)**
-   ```
-   read_log_tail(log_path="/path/to/training.log", num_lines=30)
-   ```
-   Do NOT read the entire log file - it wastes context!
-
-4. **FOURTH: Compare with paper results**
-   ```
-   comparison = compare_with_paper_results(extracted_metrics=..., expected_results_str="accuracy: 94.5%")
-   ```
-
-5. **FIFTH: Generate comparison report** (saves to file)
-   ```
-   generate_comparison_report(repo_path, extracted_metrics, paper_results, comparison)
-   ```
-   Creates `reproduction_report.md` with detailed comparison table.
-
-OR use the all-in-one tool:
-   ```
-   verify_experiment_results(repo_path, paper_expected_results, experiment_log)
-   ```
-
-COMPARISON FEATURES:
-- **Fuzzy matching**: test_accuracy matches "accuracy", F1-score matches "f1"
-- **Value normalization**: 94.5% and 0.945 are treated as equal
-- **5% tolerance**: Values within 5% relative error are considered matching
-- **Partial success**: Reports "3/4 metrics matched" even if not all match
-
-⚠️  COMMON MISTAKES TO AVOID:
-   - ❌ Reading the entire log file (wastes context, misses result files)
-   - ❌ Ignoring result files saved by the experiment
-   - ❌ Re-running experiments that already completed successfully
-   - ❌ Not checking for checkpoints before starting experiments
-
-✅ CORRECT WORKFLOW:
-   - ✅ FIRST check for existing result files
-   - ✅ ONLY read log tail (last 30 lines) for error checking
-   - ✅ Use get_experiment_checkpoint_status to check for resume points
-   - ✅ Resume from last checkpoint instead of starting over
-
-═══════════════════════════════════════════════════════════════
-RESUME FROM CHECKPOINT (NEW!)
-═══════════════════════════════════════════════════════════════
-
-Before running any experiment, check if it can be resumed:
-
-1. Check checkpoint status:
-   ```
-   get_experiment_checkpoint_status(repo_path="/path/to/repo")
-   ```
-
-2. If checkpoints exist, modify the training command to resume:
-   - HuggingFace: `--resume_from_checkpoint /path/to/checkpoint`
-   - PyTorch: `--resume checkpoint.pt`
-   - Custom: Check README for resume instructions
-
-3. If no checkpoints but results exist → skip to verification
+PHASE 5: VERIFY RESULTS (CODE-FIRST APPROACH)
+└─ **DO NOT** just read logs. WRITE PYTHON CODE to:
+   1. **Find** result files (JSON/CSV/Logs).
+   2. **Parse** them to extract metrics.
+   3. **Compare** against paper's expected values.
+└─ **REPORT**: "X/Y metrics matched (Z% success)".
+   - Success = Relative error < 5%.
 
 ═══════════════════════════════════════════════════════════════
 RESOURCE-AWARE EXECUTION
@@ -337,63 +175,54 @@ RESOURCE-AWARE EXECUTION
 {resource_instructions}
 
 ═══════════════════════════════════════════════════════════════
-PROGRESS CHECKPOINTS (Every 15 iterations)
+FINAL REPORT Requirements
 ═══════════════════════════════════════════════════════════════
+- READMEs consulted.
+- Setup Status (Tool used).
+- Data Status.
+- Experiments Run (Commands).
+- **EXTRACTED METRICS** & Comparison (% match).
+- Checkpoint Status.
 
-Ask yourself:
-1. What phase am I in? Am I making progress?
-2. Am I stuck in a retry loop? (Same error 3+ times = stuck)
-3. Should I move forward with partial success?
-
-Decision: If stuck for 10+ iterations → document blocker → move to next phase
-
-═══════════════════════════════════════════════════════════════
-FINAL REPORT SHOULD INCLUDE
-═══════════════════════════════════════════════════════════════
-
-- READMEs consulted (root + nested)
-- Setup result (success/failure + what was installed)
-- Data preparation result (location or manual steps needed)
-- Experiments run (commands + metrics obtained)
-- **RESULT FILES FOUND** (where results were saved)
-- **EXTRACTED METRICS** (from result files, not just logs)
-- Comparison with paper results (% match)
-- Any blockers encountered
-- **CHECKPOINT STATUS** (for resuming if needed)
-
-Maximum {max_iterations} tool calls - be efficient and strategic!
+Maximum {max_iterations} tool calls. Be efficient.
 """
 
+        # Minimal tool set - LLM writes code for extraction/comparison
         tools = [
+            # File operations
             read_file,
             search_file,
             list_directory,
+            # Execution
             execute_shell_command,
-            execute_python_script,
+            execute_python_code,      # PRIMARY: Write and run inline Python
+            create_python_file,       # Save reusable scripts
+            execute_python_script,    # Run saved scripts
+            # Setup utilities
             check_python_compatibility,
-            smart_install_dependencies,
-            search_log_errors,
-            search_error_solution,
-            extract_experiment_metrics,
-            compare_with_paper_results,
-            # New result discovery and verification tools
-            discover_result_files,
-            read_result_files,
-            read_log_tail,
-            verify_experiment_results,
-            get_experiment_checkpoint_status,
-            generate_comparison_report,
-            # Smart extraction tools for custom formats (e.g., poly 0.3 0.001 92.32 $\pm$ nan)
-            smart_extract_results,
-            align_and_compare_results,
+            # smart_install_dependencies,  # REMOVED: Use README instructions instead
+            search_error_solution,    # Gemini-powered error fixing
+            start_background_process, # Async training
+            wait_for_process,         # Smart blocking wait
+            stop_process,             # Process control
         ]
 
         # Use ReAct agent with native tool calling
         self.agent = create_react_agent(self.llm, tools=tools)
 
-    def _get_resource_aware_instructions(self) -> str:
+    def _get_resource_aware_instructions(self, experiment_mode: str = "single", custom_experiments: List[str] = None) -> str:
         """Generate resource-aware experiment instructions."""
         strategy = self.experiment_strategy
+        
+        # Override based on user selection
+        if experiment_mode == "all":
+            strategy = "all_experiments"
+        elif experiment_mode == "custom":
+            strategy = "custom"
+        elif experiment_mode == "single":
+            # If user wants 1 experiment but we detected high resources, 
+            # we should still restrict to main_experiment (single)
+            strategy = "main_experiment"
 
         # Common instructions for all strategies
         common_instructions = """
@@ -435,6 +264,15 @@ Before running ANY experiment script (.sh or .py), you MUST:
 ❌ NEVER assume scripts auto-detect GPU count
 ✅ ALWAYS read script first to understand GPU control
 ✅ ALWAYS use correct method for the framework
+"""
+
+        if strategy == "custom":
+            exps = ", ".join(custom_experiments or ["specified by user"])
+            return common_instructions + f"""
+🎯 CUSTOM SELECTION - Run specific experiments:
+- You MUST run ONLY the following experiments: {exps}
+- Ignore other experiments mentioned in README unless required for your selection
+- Goal: Reproduce specific selected results
 """
 
         if strategy == "all_experiments":
@@ -495,7 +333,15 @@ README excerpt:
 Experiment names (comma-separated):"""
 
             response = self.llm.invoke(prompt)
-            result = response.content.strip()
+            # Handle response content which might be a list or object
+            content = response.content
+            if isinstance(content, list):
+                # If it's a list (e.g. from Anthropic/Gemini returning blocks), join them
+                content = " ".join([str(c) for c in content])
+            elif not isinstance(content, str):
+                content = str(content)
+                
+            result = content.strip()
 
             if result == "NONE" or not result:
                 return []
@@ -513,18 +359,20 @@ Experiment names (comma-separated):"""
             print(f"⚠️  Could not extract experiments from README: {e}")
             return []
 
-    def reproduce(self, code_path: str, paper_context: str = "") -> Dict:
+    def reproduce(self, code_path: str, paper_context: str = "", experiment_mode: str = "single", custom_experiments: List[str] = None) -> Dict:
         """
         Follow README instructions to reproduce paper results.
 
         Args:
             code_path: Path to repository
             paper_context: Context from paper analysis (datasets, results to reproduce, etc.)
+            experiment_mode: 'single', 'all', or 'custom'
+            custom_experiments: List of experiment names if mode is 'custom'
 
         Returns:
             Reproduction results with setup status, data status, and experiment results
         """
-        resource_instructions = self._get_resource_aware_instructions()
+        resource_instructions = self._get_resource_aware_instructions(experiment_mode, custom_experiments)
 
         # Add context from paper if available
         paper_info = ""
@@ -543,7 +391,9 @@ Use this context to:
 ═══════════════════════════════════════════════════════════════
 """
 
-        task = f"""{self.system_prompt.format(max_iterations=self.max_iterations, resource_instructions=resource_instructions)}
+        # Use replace() instead of format() to avoid conflicts with code example curly braces
+        formatted_prompt = self.system_prompt.replace("{max_iterations}", str(self.max_iterations)).replace("{resource_instructions}", resource_instructions)
+        task = f"""{formatted_prompt}
 
 ═══════════════════════════════════════════════════════════════
 YOUR TASK: Reproduce paper results from repository
@@ -559,12 +409,26 @@ Experiment Strategy: {self.experiment_strategy.upper()}
 BEGIN WORKFLOW
 ═══════════════════════════════════════════════════════════════
 
-**IMPORTANT: Check for existing results FIRST!**
-→ get_experiment_checkpoint_status(repo_path="{code_path}")
-→ discover_result_files(repo_path="{code_path}")
+**IMPORTANT: Check for existing results/checkpoints FIRST using execute_python_code!**
 
-If results already exist → Skip to verification (Phase 5)
-If checkpoints exist → Resume from checkpoint
+```python
+execute_python_code(code='''
+from pathlib import Path
+repo = Path("{code_path}")
+results = list(repo.glob("**/*result*.json")) + list(repo.glob("**/*.csv"))
+checkpoints = list(repo.glob("**/*.pt")) + list(repo.glob("**/*.pth"))
+print(f"Results: {{len(results)}}, Checkpoints: {{len(checkpoints)}}")
+for f in results[:3]: print(f"  → {{f}}")
+''')
+```
+
+**SMART RESUME LOGIC:**
+1. Check existing results vs paper's expected datasets (use execute_python_code to compare)
+2. If ALL expected results exist → Skip to VERIFICATION (Phase 5)
+3. If SOME results missing:
+   - If checkpoints exist → Try to RESUME from checkpoint to complete missing experiments
+   - Or write script to run ONLY missing experiments (e.g., if paper expects 13 datasets but only 9 found, run the 4 missing)
+4. After completion (or if resume fails) → VERIFY all results with detailed success rate
 
 Otherwise, start by reading the root README.md:
 → read_file(file_path="{code_path}/README.md")
@@ -573,19 +437,19 @@ Then identify and execute the workflow:
 1. Environment Setup
 2. Dataset Preparation
 3. Run Experiments (Sanity Check → Main Experiment)
-4. **VERIFY RESULTS** (discover_result_files → read_result_files → compare_with_paper_results)
+4. **VERIFY RESULTS** - Write Python code to extract and compare!
 
 Remember:
 - Search for nested READMEs if mentioned
 - Follow README instructions explicitly
 - Report progress after each phase
-- **After experiments: Search for RESULT FILES first, not log files!**
-- **Only read log TAIL (last 20-30 lines) for error checking**
+- **Write custom Python code to extract metrics from result files**
+- **Write comparison code to check against paper results**
 - Stop if critical phase fails
 """
 
         messages = [HumanMessage(content=task)]
-        callback = LoggingCallbackHandler(verbose=True)
+        callback = LoggingCallbackHandler(verbose=True, metrics_tracker=self.metrics_tracker)
 
         try:
             print("\n" + "="*60)
@@ -649,6 +513,33 @@ Remember:
                     last_msg.tool_calls and
                     len(last_msg.tool_calls) > 0
                 )
+                
+                # Handling empty/malformed responses from LLM which cause premature exit
+                if not has_tool_calls and last_msg:
+                    last_content = str(getattr(last_msg, 'content', '')).strip()
+                    
+                    # If content is empty or extremely short without tool calls, it's likely an error/confusion
+                    if not last_content or len(last_content) < 5:
+                        print("   ⚠️ LLM returned empty/short response without tool calls - prompting to continue...")
+                        from langchain_core.messages import HumanMessage
+                        
+                        # Inspect recent history to provide better guidance
+                        prev_tool_output = ""
+                        if len(result_messages) >= 2:
+                            prev_msg = result_messages[-2]
+                            if hasattr(prev_msg, 'content'):
+                                prev_tool_output = str(prev_msg.content)
+                        
+                        hint = "You returned an empty message. "
+                        if "PID" in prev_tool_output and "success" in prev_tool_output:
+                            hint += "You just started a background process. You MUST now call wait_for_process(pid=...) to wait for it to finish."
+                        else:
+                            hint += "Please continue with the reproduction task using appropriate tools."
+                            
+                        continue_msg = HumanMessage(content=hint)
+                        result_messages.append(continue_msg)
+                        current_messages = result_messages
+                        continue
 
                 if not has_tool_calls:
                     # Check if LLM described a plan but didn't execute it
@@ -671,23 +562,32 @@ Remember:
                 # Prune context after this batch
                 if len(result_messages) > 10:
                     original_count = len(result_messages)
-                    original_size = sum(len(str(getattr(m, 'content', ''))) for m in result_messages)
+                    original_tokens = sum(
+                        self.context_manager.count_tokens(str(getattr(m, 'content', '')))
+                        for m in result_messages
+                    )
 
                     # Prune messages
                     pruned_messages = self.context_manager.prune_messages(result_messages)
 
                     pruned_count = len(pruned_messages)
-                    pruned_size = sum(len(str(getattr(m, 'content', ''))) for m in pruned_messages)
+                    pruned_tokens = sum(
+                        self.context_manager.count_tokens(str(getattr(m, 'content', '')))
+                        for m in pruned_messages
+                    )
 
                     print(f"\n   📊 Context Pruning:")
                     print(f"      Messages: {original_count} → {pruned_count} ({pruned_count/original_count*100:.1f}% kept)")
-                    print(f"      Size: {original_size:,} → {pruned_size:,} chars ({pruned_size/original_size*100:.1f}% kept)")
+                    print(f"      Tokens: {original_tokens:,} → {pruned_tokens:,} ({pruned_tokens/max(1, original_tokens)*100:.1f}% kept)")
 
                     # Warn if still over limit
-                    if pruned_size > self.context_manager.max_context_chars:
-                        print(f"      ⚠️  WARNING: Still over {self.context_manager.max_context_chars:,} char limit!")
+                    if pruned_tokens > self.context_manager.max_tokens:
+                        print(f"      ⚠️  WARNING: Still over {self.context_manager.max_tokens:,} token limit!")
                     else:
-                        print(f"      ✅ Under {self.context_manager.max_context_chars:,} char limit")
+                        print(f"      ✅ Under {self.context_manager.max_tokens:,} token limit")
+
+                    # Store important context in hierarchical storage
+                    self._store_batch_summary(result_messages, batch)
 
                     current_messages = pruned_messages
                 else:
@@ -699,6 +599,83 @@ Remember:
         except Exception as e:
             print(f"\n❌ Agent execution error: {e}")
             raise
+
+    def _store_batch_summary(self, messages: List, batch_num: int):
+        """
+        Store important information from batch in hierarchical context.
+
+        Extracts key results, errors, and decisions for semantic retrieval.
+        """
+        try:
+            for msg in messages:
+                content = str(getattr(msg, 'content', ''))
+                content_lower = content.lower()
+
+                # Skip empty or very short content
+                if len(content) < 50:
+                    continue
+
+                # Store errors for future reference
+                if any(kw in content_lower for kw in ['error', 'failed', 'exception', 'traceback']):
+                    # Extract concise error summary
+                    error_summary = content[:500] if len(content) > 500 else content
+                    self.hierarchical_context.add(
+                        content=f"[Batch {batch_num}] Error: {error_summary}",
+                        source="reproduction",
+                        entry_type="error",
+                        importance=0.9
+                    )
+
+                # Store successful results
+                elif any(kw in content_lower for kw in ['success', 'completed', 'accuracy', 'loss', 'metric']):
+                    result_summary = content[:500] if len(content) > 500 else content
+                    self.hierarchical_context.add(
+                        content=f"[Batch {batch_num}] Result: {result_summary}",
+                        source="reproduction",
+                        entry_type="result",
+                        importance=1.0
+                    )
+
+                # Store important decisions/observations
+                elif any(kw in content_lower for kw in ['found', 'discovered', 'using', 'running']):
+                    observation = content[:300] if len(content) > 300 else content
+                    self.hierarchical_context.add(
+                        content=f"[Batch {batch_num}] {observation}",
+                        source="reproduction",
+                        entry_type="observation",
+                        importance=0.6
+                    )
+
+        except Exception as e:
+            # Don't fail the main workflow if context storage fails
+            print(f"   ⚠️  Warning: Failed to store batch context: {e}")
+
+    def _get_relevant_context(self, query: str) -> str:
+        """
+        Get relevant historical context for current task.
+
+        Uses hierarchical context manager for semantic retrieval.
+        """
+        try:
+            relevant = self.hierarchical_context.retrieve(
+                query=query,
+                max_tokens=10000  # Budget for historical context
+            )
+
+            if not relevant:
+                return ""
+
+            sections = []
+            for r in relevant[:5]:
+                source = r.get('source', 'context')
+                content = r.get('content', '')
+                sections.append(f"[{source}] {content}")
+
+            return "\n\n".join(sections)
+
+        except Exception as e:
+            print(f"   ⚠️  Warning: Failed to retrieve context: {e}")
+            return ""
 
     def _parse_reproduction_result(self, result: Dict, code_path: str, experiment_names: List[str] = None) -> Dict:
         """Extract reproduction status from agent result."""

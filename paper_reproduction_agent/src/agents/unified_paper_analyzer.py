@@ -1,4 +1,4 @@
-"""Unified Paper Analyzer Agent - Single LLM call to extract all key information."""
+"""Unified Paper Analyzer Agent - Generic extraction without forced structure."""
 
 from typing import Dict, List
 from langchain_core.messages import HumanMessage
@@ -9,15 +9,42 @@ import json
 
 class UnifiedPaperAnalyzer:
     """
-    Simplified paper analyzer that extracts all needed information in one LLM call.
+    Generic paper analyzer that lets the LLM intelligently extract information.
 
-    This replaces the fragmented approach of multiple extraction steps with a single,
-    comprehensive analysis that lets the LLM understand the paper holistically.
+    No forced formats - the LLM identifies tables, results, and structures them naturally.
     """
 
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, metrics_tracker=None):
         """Initialize the unified paper analyzer."""
         self.llm = llm or create_llm(temperature=0.1)
+        self.metrics_tracker = metrics_tracker
+
+    def _extract_text_from_response(self, response) -> str:
+        """Extract text from LLM response, handling both string and list formats.
+
+        Args:
+            response: LLM response object
+
+        Returns:
+            Extracted text as string
+        """
+        response_text = ""
+        if hasattr(response, 'content'):
+            # Handle case where content might be a list
+            if isinstance(response.content, list):
+                # Extract text from list of content blocks
+                for item in response.content:
+                    if isinstance(item, dict) and 'text' in item:
+                        response_text += item['text']
+                    elif isinstance(item, str):
+                        response_text += item
+                    elif hasattr(item, 'text'):
+                        response_text += item.text
+            else:
+                response_text = str(response.content)
+        else:
+            response_text = str(response)
+        return response_text
 
     def analyze_paper(self, paper_text: str, paper_title: str = "Unknown") -> Dict:
         """
@@ -30,87 +57,150 @@ class UnifiedPaperAnalyzer:
         Returns:
             Dictionary containing:
             - github_repos: List of GitHub/GitLab/Bitbucket URLs found
-            - results_to_reproduce: Dict with metrics, datasets, and expected values
+            - results_to_reproduce: Dict with metrics and tables
             - core_contribution: Brief description of what the paper does
+            - datasets: List of datasets mentioned
             - context_summary: Natural language summary for next agents
         """
         # First, do regex extraction for GitHub URLs (fast and reliable)
         github_urls = self._extract_code_urls_regex(paper_text)
 
-        # Now ask LLM to extract results and understand the paper
-        prompt = f"""Analyze this research paper and extract key information needed for reproduction.
+        # Single-step extraction: Ask LLM to extract everything in structured format
+        prompt = f"""Analyze this research paper and extract key information.
 
 Paper Title: {paper_title}
 
 Paper Text:
 {paper_text}
 
-Please extract and provide in a clear, structured format:
+Extract the following information and return it in JSON format:
 
-1. **Main Results to Reproduce:**
-   - What metrics are reported? (e.g., accuracy, F1, BLEU, perplexity, loss)
-   - What datasets were used?
-   - What are the specific numerical values reported?
-   - Format: "Dataset: [name] | Metric: [metric] | Value: [value]"
+1. **core_contribution**: Brief description of the main contribution (1-2 sentences)
 
-2. **Core Contribution:**
-   - In 1-2 sentences, what is the main contribution or claim of this paper?
-   - What is the key innovation being tested?
+2. **datasets**: List of dataset names mentioned in the paper (e.g., ["MNIST", "CIFAR-10", "ImageNet"])
 
-3. **Additional GitHub/Code URLs:**
-   - Are there any code repository URLs mentioned in the text?
-   - Look for: github.com, gitlab.com, bitbucket.org
-   - List full URLs if found
+3. **implementation_details**: Any implementation details mentioned (model architecture, hyperparameters, etc.)
 
-4. **Datasets Mentioned:**
-   - List all datasets mentioned (e.g., MNIST, CIFAR-10, ImageNet, SQuAD, WMT)
+4. **code_repositories**: Any GitHub/GitLab/Bitbucket URLs mentioned
 
-5. **Key Implementation Details:**
-   - Any specific model architectures mentioned?
-   - Any crucial hyperparameters reported?
-   - Training setup (epochs, batch size, etc.)?
+5. **result_tables**: For each result table in the paper, extract:
+   - Table name/number
+   - The datasets tested
+   - The metrics measured (accuracy, F1, BLEU, etc.)
+   - The values achieved by the proposed method
 
-Provide your response in a clear, structured format that can be easily parsed.
-Focus on being specific and extracting actual numbers from the results section."""
+   Structure each table as a list of results, where each result has:
+   - "dataset": dataset name
+   - "metric": metric name
+   - "value": the value (as string, keep units like % or decimals)
+
+Return ONLY valid JSON in this exact format:
+```json
+{{
+  "core_contribution": "...",
+  "datasets": ["dataset1", "dataset2", ...],
+  "implementation_details": "...",
+  "code_repositories": ["url1", "url2", ...],
+  "result_tables": [
+    {{
+      "table_name": "Table 1",
+      "results": [
+        {{"dataset": "MNIST", "metric": "Accuracy", "value": "98.5%"}},
+        {{"dataset": "CIFAR-10", "metric": "Accuracy", "value": "92.3%"}}
+      ]
+    }}
+  ]
+}}
+```
+
+Be thorough - extract ALL result tables and ALL datasets mentioned. If information is not found, use empty string or empty list."""
 
         messages = [HumanMessage(content=prompt)]
 
         try:
-            # Just invoke the LLM directly - no tool calling needed
-            result = self.llm.invoke(messages)
+            # Setup callback for token tracking
+            from ..utils.logging_callback import LoggingCallbackHandler
+            callbacks = [LoggingCallbackHandler(verbose=True, metrics_tracker=self.metrics_tracker)] if self.metrics_tracker else []
 
-            response_text = result.content if hasattr(result, 'content') else str(result)
+            # Get structured extraction
+            result = self.llm.invoke(messages, config={"callbacks": callbacks})
+            response_text = self._extract_text_from_response(result)
 
-            # Clean up any thinking tags
-            clean_response = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
-            clean_response = re.sub(r'<tool_call>.*?</tool_call>', '', clean_response, flags=re.DOTALL)
-            clean_response = re.sub(r'\n\s*\n', '\n', clean_response).strip()
+            # Clean up thinking tags and tool calls
+            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
+            response_text = re.sub(r'<tool_call>.*?</tool_call>', '', response_text, flags=re.DOTALL)
+            response_text = response_text.strip()
 
-            # Parse the LLM response
-            parsed_results = self._parse_llm_response(clean_response)
+            print(f"\n📄 Paper analysis complete ({len(response_text)} chars)")
+            print(f"Preview: {response_text[:500]}...\n")
 
-            # Combine regex URLs with any URLs found by LLM
-            all_repos = list(set(github_urls + parsed_results.get("github_repos", [])))
+            # Extract JSON from response (might be wrapped in markdown code blocks)
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if not json_match:
+                json_match = re.search(r'```\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if not json_match:
+                json_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
 
+            structured_data = {}
+            if json_match:
+                try:
+                    structured_data = json.loads(json_match.group(1))
+                    print(f"✅ Successfully parsed JSON response")
+                except json.JSONDecodeError as e:
+                    print(f"⚠️  JSON parsing failed: {e}")
+                    structured_data = {}
+
+            # Extract GitHub URLs from both regex and LLM
+            llm_repos = structured_data.get("code_repositories", [])
+
+            # Normalize LLM-provided URLs (add https:// if missing)
+            normalized_llm_repos = []
+            for repo in llm_repos:
+                if repo and isinstance(repo, str):
+                    if not repo.startswith("http"):
+                        # Check if it looks like a valid repo URL
+                        if any(platform in repo.lower() for platform in ["github.com", "gitlab.com", "bitbucket.org"]):
+                            repo = f"https://{repo}"
+                    normalized_llm_repos.append(repo)
+
+            # Also extract URLs from response text using regex
+            github_pattern = r'https?://(?:github|gitlab|bitbucket)\.(?:com|org)/[\w\-\.]+/[\w\-\.]+'
+            llm_found_urls = re.findall(github_pattern, response_text, re.IGNORECASE)
+
+            # Combine all sources and deduplicate
+            all_repos = list(set(github_urls + normalized_llm_repos + llm_found_urls))
+
+            # Convert result_tables to the format expected by orchestrator
+            result_tables = structured_data.get("result_tables", [])
+
+            # Flatten all results from all tables into a single list
+            all_results = []
+            for table in result_tables:
+                table_results = table.get("results", [])
+                all_results.extend(table_results)
+
+            # Return in expected format
             return {
                 "github_repos": all_repos,
-                "results_to_reproduce": parsed_results.get("results_to_reproduce", {}),
-                "core_contribution": parsed_results.get("core_contribution", ""),
-                "datasets": parsed_results.get("datasets", []),
-                "implementation_details": parsed_results.get("implementation_details", ""),
-                "context_summary": self._create_context_summary(
-                    paper_title,
-                    all_repos,
-                    parsed_results
-                ),
-                "raw_analysis": clean_response
+                "results_to_reproduce": {
+                    "tables": result_tables,  # Full table structure
+                    "metrics": all_results,    # Flattened list for easy access
+                },
+                "core_contribution": structured_data.get("core_contribution", ""),
+                "datasets": structured_data.get("datasets", []),
+                "implementation_details": structured_data.get("implementation_details", ""),
+                "context_summary": f"Paper: {paper_title}. Found {len(all_repos)} code repositories. Extracted {len(all_results)} metrics from {len(result_tables)} tables.",
+                "raw_analysis": response_text,
+                "structured_data": structured_data
             }
 
         except Exception as e:
             print(f"⚠️  LLM analysis failed: {str(e)[:200]}")
+            import traceback
+            traceback.print_exc()
             return {
                 "github_repos": github_urls,  # At least return regex results
-                "results_to_reproduce": {},
+                "results_to_reproduce": {"tables": [], "metrics": []},
                 "core_contribution": "",
                 "datasets": [],
                 "implementation_details": "",
@@ -118,6 +208,66 @@ Focus on being specific and extracting actual numbers from the results section."
                 "raw_analysis": "",
                 "error": str(e)
             }
+
+    def _execute_parsing_code(self, code_response: str, raw_text: str) -> Dict:
+        """
+        Extract and execute Python code generated by the LLM.
+
+        Args:
+            code_response: LLM response containing Python code
+            raw_text: The raw extracted text to parse
+
+        Returns:
+            Dictionary with structured results
+        """
+        # Extract Python code from markdown blocks
+        code_pattern = r'```python\n(.*?)```'
+        code_matches = re.findall(code_pattern, code_response, re.DOTALL)
+
+        if not code_matches:
+            # Try without markdown
+            code_pattern = r'```\n(.*?)```'
+            code_matches = re.findall(code_pattern, code_response, re.DOTALL)
+
+        if not code_matches:
+            print("⚠️  No code block found in LLM response")
+            return None
+
+        code = code_matches[0].strip()
+        print(f"🔧 Executing generated code ({len(code)} chars)...")
+
+        try:
+            # Create execution environment with raw_text
+            exec_globals = {
+                'raw_text': raw_text,
+                're': re,
+                'json': json,
+            }
+            exec_locals = {}
+
+            # Execute the code
+            exec(code, exec_globals, exec_locals)
+
+            # Look for 'results' variable or return value
+            if 'results' in exec_locals:
+                results = exec_locals['results']
+                print(f"✅ Code executed successfully, got structured results")
+                return results
+            else:
+                # Check if there's any dict in locals
+                for key, value in exec_locals.items():
+                    if isinstance(value, dict) and key != '__builtins__':
+                        print(f"✅ Code executed, using variable '{key}' as results")
+                        return value
+
+                print("⚠️  Code executed but no results dict found")
+                return None
+
+        except Exception as e:
+            print(f"❌ Code execution failed: {str(e)[:200]}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _extract_code_urls_regex(self, paper_text: str) -> List[str]:
         """
@@ -162,108 +312,6 @@ Focus on being specific and extracting actual numbers from the results section."
         # Remove duplicates
         return list(set(all_urls))
 
-    def _parse_llm_response(self, response_text: str) -> Dict:
-        """
-        Parse the LLM's structured response.
-
-        Extracts information from the formatted response.
-        """
-        parsed = {
-            "github_repos": [],
-            "results_to_reproduce": {
-                "metrics": [],
-                "summary": ""
-            },
-            "core_contribution": "",
-            "datasets": [],
-            "implementation_details": ""
-        }
-
-        # Extract GitHub URLs mentioned in response
-        github_pattern = r'https?://(?:github|gitlab|bitbucket)\.(?:com|org)/[\w\-\.]+/[\w\-\.]+'
-        github_urls = re.findall(github_pattern, response_text, re.IGNORECASE)
-        parsed["github_repos"] = list(set(github_urls))
-
-        # Extract datasets
-        dataset_patterns = [
-            r'\b(MNIST|CIFAR-?10|CIFAR-?100|ImageNet|COCO|Pascal VOC|MS COCO)\b',
-            r'\b(SQuAD|GLUE|SuperGLUE|WikiText|Penn Treebank|WMT\d*)\b',
-            r'\b(LibriSpeech|Common Voice|AudioSet)\b',
-        ]
-        for pattern in dataset_patterns:
-            datasets = re.findall(pattern, response_text, re.IGNORECASE)
-            parsed["datasets"].extend(datasets)
-        parsed["datasets"] = list(set(parsed["datasets"]))
-
-        # Extract metric lines (Dataset: X | Metric: Y | Value: Z)
-        metric_pattern = r'Dataset:\s*([^\|]+)\s*\|\s*Metric:\s*([^\|]+)\s*\|\s*Value:\s*([^\n]+)'
-        metric_matches = re.findall(metric_pattern, response_text, re.IGNORECASE)
-
-        metrics_list = []
-        for dataset, metric, value in metric_matches:
-            metrics_list.append({
-                "dataset": dataset.strip(),
-                "metric": metric.strip(),
-                "value": value.strip()
-            })
-
-        if metrics_list:
-            parsed["results_to_reproduce"]["metrics"] = metrics_list
-
-        # Store full response as summary
-        parsed["results_to_reproduce"]["summary"] = response_text
-
-        # Extract core contribution (look for section after "Core Contribution")
-        contribution_match = re.search(
-            r'(?:Core Contribution|Main Contribution)[:\s]*([^\n]+(?:\n(?!\#)[^\n]+)*)',
-            response_text,
-            re.IGNORECASE
-        )
-        if contribution_match:
-            parsed["core_contribution"] = contribution_match.group(1).strip()
-
-        # Extract implementation details
-        impl_match = re.search(
-            r'(?:Implementation Details|Key Implementation)[:\s]*([^\n]+(?:\n(?!\#)[^\n]+)*)',
-            response_text,
-            re.IGNORECASE
-        )
-        if impl_match:
-            parsed["implementation_details"] = impl_match.group(1).strip()
-
-        return parsed
-
-    def _create_context_summary(self, paper_title: str, repos: List[str],
-                                parsed_results: Dict) -> str:
-        """
-        Create a natural language summary for next agents.
-
-        This summary will be stored in agent_contexts so other agents can understand
-        what the paper is about without re-reading everything.
-        """
-        summary_parts = [f"Paper: {paper_title}"]
-
-        if parsed_results.get("core_contribution"):
-            summary_parts.append(f"Contribution: {parsed_results['core_contribution']}")
-
-        if parsed_results.get("datasets"):
-            datasets_str = ", ".join(parsed_results["datasets"][:3])  # First 3
-            summary_parts.append(f"Datasets: {datasets_str}")
-
-        metrics = parsed_results.get("results_to_reproduce", {}).get("metrics", [])
-        if metrics:
-            # Show first 2 metrics
-            metric_strs = []
-            for m in metrics[:2]:
-                metric_strs.append(f"{m['metric']}={m['value']} on {m['dataset']}")
-            summary_parts.append(f"Key Results: {'; '.join(metric_strs)}")
-
-        if repos:
-            summary_parts.append(f"Code: {repos[0]}")  # First repo
-            if len(repos) > 1:
-                summary_parts.append(f"(+{len(repos)-1} more repos)")
-
-        return ". ".join(summary_parts)
 
     def enhanced_repo_discovery(
         self,
@@ -286,7 +334,7 @@ Focus on being specific and extracting actual numbers from the results section."
             authors: List of author names (for validation)
 
         Returns:
-            List of discovered GitHub repository URLs (high confidence only)
+            List of dicts with repository metadata (URL, match_file/source, confidence)
         """
         from ..tools.code_search_tools import (
             search_github_for_arxiv_reference,
@@ -294,7 +342,8 @@ Focus on being specific and extracting actual numbers from the results section."
             web_search_for_implementation
         )
 
-        discovered_repos = []
+        discovered_repos = []  # List of dicts with full metadata
+        discovered_urls = set()  # Track URLs to avoid duplicates
 
         # Method 1: Search GitHub for repos that reference the arXiv paper
         if arxiv_id:
@@ -303,11 +352,19 @@ Focus on being specific and extracting actual numbers from the results section."
                 arxiv_results = search_github_for_arxiv_reference(arxiv_id)
 
                 for result in arxiv_results:
-                    if result.get("url") and result.get("confidence") == "high":
-                        url = result["url"]
-                        if url not in discovered_repos:
-                            discovered_repos.append(url)
-                            print(f"   ✅ Found: {url} (arXiv reference in {result.get('match_file', 'README')})")
+                    url = result.get("url")
+                    if url and result.get("confidence") == "high" and url not in discovered_urls:
+                        discovered_urls.add(url)
+                        discovered_repos.append({
+                            "url": url,
+                            "match_file": result.get("match_file", "README"),
+                            "confidence": result.get("confidence", "high"),
+                            "stars": result.get("stars", 0),  # Pass through star count
+                            "source": "arxiv_reference"
+                        })
+                        stars = result.get("stars", 0)
+                        stars_str = f" [{stars:,} ⭐]" if stars else ""
+                        print(f"   ✅ Found: {url}{stars_str} (arXiv reference in {result.get('match_file', 'README')})")
 
             except Exception as e:
                 print(f"   ⚠️  GitHub arXiv search failed: {str(e)[:50]}")
@@ -325,11 +382,19 @@ Focus on being specific and extracting actual numbers from the results section."
 
                 for result in name_results:
                     url = result.get("url")
-                    if url and result.get("is_exact_match"):
-                        if url not in discovered_repos:
-                            discovered_repos.append(url)
-                            term = result.get("matched_term", "")
-                            print(f"   ✅ Found: {url} (name matches '{term}')")
+                    if url and result.get("is_exact_match") and url not in discovered_urls:
+                        discovered_urls.add(url)
+                        discovered_repos.append({
+                            "url": url,
+                            "matched_term": result.get("matched_term", ""),
+                            "confidence": result.get("confidence", "medium"),
+                            "stars": result.get("stars", 0),  # Pass through star count
+                            "source": "name_match"
+                        })
+                        term = result.get("matched_term", "")
+                        stars = result.get("stars", 0)
+                        stars_str = f" [{stars:,} ⭐]" if stars else ""
+                        print(f"   ✅ Found: {url}{stars_str} (name matches '{term}')")
 
             except Exception as e:
                 print(f"   ⚠️  GitHub name search failed: {str(e)[:50]}")
@@ -351,11 +416,16 @@ Focus on being specific and extracting actual numbers from the results section."
 
                 for result in web_results:
                     url = result.get("url")
-                    if url and result.get("confidence") == "high":
-                        if url not in discovered_repos:
-                            discovered_repos.append(url)
-                            reason = result.get("reason", "LLM evaluation")
-                            print(f"   ✅ Found: {url} ({reason[:50]})")
+                    if url and result.get("confidence") == "high" and url not in discovered_urls:
+                        discovered_urls.add(url)
+                        discovered_repos.append({
+                            "url": url,
+                            "reason": result.get("reason", "LLM evaluation"),
+                            "confidence": result.get("confidence", "high"),
+                            "source": "web_search"
+                        })
+                        reason = result.get("reason", "LLM evaluation")
+                        print(f"   ✅ Found: {url} ({reason[:50]})")
 
             except Exception as e:
                 print(f"   ⚠️  Web search failed: {str(e)[:50]}")

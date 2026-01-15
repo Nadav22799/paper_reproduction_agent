@@ -1,25 +1,101 @@
-"""Context management utilities for preventing context window explosion."""
+"""Context management utilities for preventing context window explosion.
+
+Updated to use token-based budget management (2025 best practices).
+"""
 
 import re
-from typing import List, Dict, Any, Tuple
+import logging
+from typing import List, Dict, Any, Tuple, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
+
+logger = logging.getLogger(__name__)
 
 
 class ContextManager:
-    """Manages conversation context to prevent explosion with aggressive pruning."""
+    """Manages conversation context to prevent explosion with aggressive pruning.
 
-    def __init__(self, max_context_chars: int = 200000, sliding_window_size: int = 2):
+    Updated to use token-based budget management instead of character-based limits.
+    Token counting uses tiktoken for accurate OpenAI/Anthropic token estimation.
+    """
+
+    # Token limits for truncation (converted from chars at ~4 chars/token ratio)
+    LIGHT_TRUNCATE_TOKENS = 2000    # Was 8000 chars
+    NORMAL_TRUNCATE_TOKENS = 1250   # Was 5000 chars
+    AGGRESSIVE_TRUNCATE_TOKENS = 500  # Was 2000 chars
+    NUCLEAR_TRUNCATE_TOKENS = 375   # Was 1500 chars
+
+    def __init__(
+        self,
+        max_tokens: int = 50000,
+        sliding_window_size: int = 2,
+        model_name: str = "gpt-4",
+        # Legacy support
+        max_context_chars: Optional[int] = None
+    ):
         """
         Initialize context manager.
 
         Args:
-            max_context_chars: Maximum total characters in context (hard limit)
+            max_tokens: Maximum total tokens in context (hard limit)
             sliding_window_size: Number of recent tool calls to keep in detail
+            model_name: Model name for tokenizer selection
+            max_context_chars: DEPRECATED - use max_tokens instead
         """
-        self.max_context_chars = max_context_chars
+        # Handle legacy parameter
+        if max_context_chars is not None:
+            logger.warning(
+                "max_context_chars is deprecated, converting to tokens. "
+                "Use max_tokens parameter instead."
+            )
+            # Convert chars to tokens (approximately 4 chars per token)
+            max_tokens = max_context_chars // 4
+
+        self.max_tokens = max_tokens
         self.sliding_window_size = sliding_window_size
+        self.model_name = model_name
         self.seen_errors = set()
         self.error_summaries = []  # Store summarized errors for context
+
+        # Initialize tokenizer
+        self._init_tokenizer()
+
+        # Legacy alias for backward compatibility
+        self.max_context_chars = max_tokens * 4  # Approximate for old code
+
+    def _init_tokenizer(self):
+        """Initialize tiktoken tokenizer for accurate token counting."""
+        try:
+            import tiktoken
+            try:
+                self.tokenizer = tiktoken.encoding_for_model(self.model_name)
+            except KeyError:
+                # Fallback to cl100k_base (GPT-4/ChatGPT encoding)
+                self.tokenizer = tiktoken.get_encoding("cl100k_base")
+            logger.debug(f"Tokenizer initialized for model: {self.model_name}")
+        except ImportError:
+            logger.warning("tiktoken not available, using character-based estimation")
+            self.tokenizer = None
+
+    def count_tokens(self, text: str) -> int:
+        """
+        Count tokens for text using tiktoken.
+
+        Falls back to character-based estimation if tiktoken unavailable.
+
+        Args:
+            text: Text to count tokens for
+
+        Returns:
+            Token count
+        """
+        if not text:
+            return 0
+
+        if self.tokenizer is not None:
+            return len(self.tokenizer.encode(text))
+        else:
+            # Fallback: ~4 characters per token
+            return len(text) // 4
 
     def prune_messages(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         """
@@ -46,24 +122,24 @@ class ContextManager:
         current_size = self._get_total_size(messages)
 
         # If under 50% of limit, do light pruning only
-        if current_size < self.max_context_chars * 0.5:
+        if current_size < self.max_tokens * 0.5:
             return self._light_prune(messages)
 
         # If under limit but over 50%, do normal pruning
-        if current_size < self.max_context_chars:
+        if current_size < self.max_tokens:
             return self._normal_prune(messages)
 
         # Over limit - aggressive pruning
         return self._aggressive_prune(messages)
 
     def _get_total_size(self, messages: List[BaseMessage]) -> int:
-        """Get total character count of messages."""
-        return sum(len(str(getattr(msg, 'content', ''))) for msg in messages)
+        """Get total token count of messages."""
+        return sum(self.count_tokens(str(getattr(msg, 'content', ''))) for msg in messages)
 
     def _light_prune(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         """Light pruning when under 50% capacity."""
         # Just deduplicate errors and truncate extreme outputs
-        messages = self._truncate_extreme_outputs(messages, limit=8000)
+        messages = self._truncate_extreme_outputs(messages, token_limit=self.LIGHT_TRUNCATE_TOKENS)
         messages = self._deduplicate_errors(messages)
         return messages
 
@@ -96,14 +172,14 @@ class ContextManager:
             pruned_messages = system_msgs + initial_msgs + all_interaction_msgs
 
         # Truncate outputs and deduplicate errors
-        pruned_messages = self._truncate_extreme_outputs(pruned_messages, limit=5000)
+        pruned_messages = self._truncate_extreme_outputs(pruned_messages, token_limit=self.NORMAL_TRUNCATE_TOKENS)
         pruned_messages = self._deduplicate_errors(pruned_messages)
 
         return pruned_messages
 
     def _aggressive_prune(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         """Aggressive pruning when over limit."""
-        print("   ⚠️  AGGRESSIVE PRUNING - Over context limit!")
+        print(f"   ⚠️  AGGRESSIVE PRUNING - Over {self.max_tokens:,} token limit!")
 
         # Separate messages
         system_msgs, initial_msgs, tool_interactions = self._categorize_messages(messages)
@@ -148,12 +224,12 @@ class ContextManager:
                 candidate.extend(all_msgs)
 
             # Truncate all tool outputs aggressively
-            candidate = self._truncate_all_outputs(candidate, limit=2000)
+            candidate = self._truncate_all_outputs(candidate, token_limit=self.AGGRESSIVE_TRUNCATE_TOKENS)
 
             # Check size
             size = self._get_total_size(candidate)
-            if size <= self.max_context_chars:
-                print(f"   ✅ Reduced to {keep_count} recent interaction(s), size: {size:,} chars")
+            if size <= self.max_tokens:
+                print(f"   ✅ Reduced to {keep_count} recent interaction(s), size: {size:,} tokens")
                 return candidate
 
             keep_count += 1
@@ -189,10 +265,13 @@ Continue from where you left off. Check current state before proceeding.
                 last_interaction = grouped_interactions[-1]
                 for msg in last_interaction:
                     if isinstance(msg, ToolMessage):
-                        # Truncate to 1500 chars
-                        content = str(msg.content)[:1500]
-                        if len(str(msg.content)) > 1500:
-                            content += "\n...[truncated]"
+                        # Truncate to token limit
+                        content = str(msg.content)
+                        content_tokens = self.count_tokens(content)
+                        if content_tokens > self.NUCLEAR_TRUNCATE_TOKENS:
+                            # Approximate character limit from token limit
+                            char_limit = self.NUCLEAR_TRUNCATE_TOKENS * 4
+                            content = content[:char_limit] + "\n...[truncated]"
                         result.append(ToolMessage(
                             content=content,
                             tool_call_id=getattr(msg, 'tool_call_id', '')
@@ -201,15 +280,17 @@ Continue from where you left off. Check current state before proceeding.
 
         # Final size check
         size = self._get_total_size(result)
-        if size > self.max_context_chars:
+        if size > self.max_tokens:
             # Truncate initial message if needed
             for i, msg in enumerate(result):
                 if isinstance(msg, HumanMessage) and i < 3:
                     content = str(msg.content)
-                    if len(content) > 5000:
-                        result[i] = HumanMessage(content=content[:5000] + "\n...[truncated]")
+                    content_tokens = self.count_tokens(content)
+                    if content_tokens > 1250:  # ~5000 chars
+                        char_limit = 1250 * 4
+                        result[i] = HumanMessage(content=content[:char_limit] + "\n...[truncated]")
 
-        print(f"   🔥 Nuclear pruning complete, size: {self._get_total_size(result):,} chars")
+        print(f"   🔥 Nuclear pruning complete, size: {self._get_total_size(result):,} tokens")
         return result
 
     def _categorize_messages(self, messages: List[BaseMessage]) -> Tuple[List, List, List]:
@@ -312,8 +393,13 @@ Continue from where you left off. Check current state before proceeding.
 
         return HumanMessage(content="\n".join(summary_parts))
 
-    def _truncate_extreme_outputs(self, messages: List[BaseMessage], limit: int = 5000) -> List[BaseMessage]:
-        """Truncate extremely large outputs, keeping last 3 tool messages in full."""
+    def _truncate_extreme_outputs(self, messages: List[BaseMessage], token_limit: int = 2000) -> List[BaseMessage]:
+        """Truncate extremely large outputs, keeping last 3 tool messages in full.
+
+        Args:
+            messages: List of messages to truncate
+            token_limit: Maximum tokens per message (default 2000 tokens)
+        """
         truncated = []
 
         # Find tool message indices
@@ -323,13 +409,18 @@ Continue from where you left off. Check current state before proceeding.
         for i, msg in enumerate(messages):
             if isinstance(msg, ToolMessage) and i not in recent_tool_indices:
                 content = str(getattr(msg, 'content', ''))
-                if len(content) > limit:
+                content_tokens = self.count_tokens(content)
+
+                if content_tokens > token_limit:
+                    # Approximate character limit from token limit
+                    char_limit = token_limit * 4
                     # Keep first and last parts
-                    first_part = content[:int(limit * 0.6)]
-                    last_part = content[-int(limit * 0.3):]
+                    first_part = content[:int(char_limit * 0.6)]
+                    last_part = content[-int(char_limit * 0.3):]
+                    tokens_removed = content_tokens - token_limit
                     truncated_content = (
                         first_part +
-                        f"\n\n... [{len(content) - limit} chars truncated] ...\n\n" +
+                        f"\n\n... [{tokens_removed} tokens truncated] ...\n\n" +
                         last_part
                     )
                     msg = ToolMessage(
@@ -340,20 +431,30 @@ Continue from where you left off. Check current state before proceeding.
 
         return truncated
 
-    def _truncate_all_outputs(self, messages: List[BaseMessage], limit: int = 2000) -> List[BaseMessage]:
-        """Truncate ALL tool outputs to limit (for aggressive pruning)."""
+    def _truncate_all_outputs(self, messages: List[BaseMessage], token_limit: int = 500) -> List[BaseMessage]:
+        """Truncate ALL tool outputs to token limit (for aggressive pruning).
+
+        Args:
+            messages: List of messages to truncate
+            token_limit: Maximum tokens per message (default 500 tokens)
+        """
         truncated = []
 
         for msg in messages:
             if isinstance(msg, ToolMessage):
                 content = str(getattr(msg, 'content', ''))
-                if len(content) > limit:
+                content_tokens = self.count_tokens(content)
+
+                if content_tokens > token_limit:
+                    # Approximate character limit from token limit
+                    char_limit = token_limit * 4
                     # Keep first part and last part
-                    first_part = content[:int(limit * 0.6)]
-                    last_part = content[-int(limit * 0.3):]
+                    first_part = content[:int(char_limit * 0.6)]
+                    last_part = content[-int(char_limit * 0.3):]
+                    tokens_removed = content_tokens - token_limit
                     truncated_content = (
                         first_part +
-                        f"\n\n... [{len(content) - limit} chars truncated] ...\n\n" +
+                        f"\n\n... [{tokens_removed} tokens truncated] ...\n\n" +
                         last_part
                     )
                     msg = ToolMessage(
@@ -362,8 +463,11 @@ Continue from where you left off. Check current state before proceeding.
                     )
             elif isinstance(msg, AIMessage):
                 content = str(getattr(msg, 'content', ''))
-                if len(content) > limit:
-                    truncated_content = content[:limit] + "\n...[truncated]"
+                content_tokens = self.count_tokens(content)
+
+                if content_tokens > token_limit:
+                    char_limit = token_limit * 4
+                    truncated_content = content[:char_limit] + "\n...[truncated]"
                     if hasattr(msg, 'tool_calls') and msg.tool_calls:
                         msg = AIMessage(content=truncated_content, tool_calls=msg.tool_calls)
                     else:
@@ -465,12 +569,14 @@ Continue from where you left off. Check current state before proceeding.
                     continue
                 seen_signatures.add(signature)
 
-                # Truncate long error messages
-                if len(content) > 1500:
+                # Truncate long error messages (375 tokens ~ 1500 chars)
+                content_tokens = self.count_tokens(content)
+                if content_tokens > self.NUCLEAR_TRUNCATE_TOKENS:
+                    char_limit = self.NUCLEAR_TRUNCATE_TOKENS * 4
                     truncated_content = (
-                        content[:1000] +
+                        content[:int(char_limit * 0.67)] +
                         "\n... (middle truncated) ...\n" +
-                        content[-400:]
+                        content[-int(char_limit * 0.27):]
                     )
                     msg = self._clone_message_with_content(msg, truncated_content)
 
@@ -508,8 +614,11 @@ Continue from where you left off. Check current state before proceeding.
         return msg
 
     def get_context_stats(self, messages: List[BaseMessage]) -> Dict[str, Any]:
-        """Get statistics about the current context."""
-        total_chars = self._get_total_size(messages)
+        """Get statistics about the current context.
+
+        Returns token-based statistics (updated from character-based).
+        """
+        total_tokens = self._get_total_size(messages)
         total_messages = len(messages)
 
         type_counts = {}
@@ -517,13 +626,16 @@ Continue from where you left off. Check current state before proceeding.
             msg_type = type(msg).__name__
             type_counts[msg_type] = type_counts.get(msg_type, 0) + 1
 
-        utilization = (total_chars / self.max_context_chars) * 100
+        utilization = (total_tokens / self.max_tokens) * 100
 
         return {
             'total_messages': total_messages,
-            'total_chars': total_chars,
-            'chars_remaining': self.max_context_chars - total_chars,
+            'total_tokens': total_tokens,
+            'tokens_remaining': self.max_tokens - total_tokens,
             'utilization_pct': utilization,
             'message_types': type_counts,
-            'status': 'OK' if utilization < 80 else 'WARNING' if utilization < 100 else 'CRITICAL'
+            'status': 'OK' if utilization < 80 else 'WARNING' if utilization < 100 else 'CRITICAL',
+            # Legacy fields for backward compatibility
+            'total_chars': total_tokens * 4,  # Approximate
+            'chars_remaining': (self.max_tokens - total_tokens) * 4
         }

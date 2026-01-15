@@ -1,15 +1,13 @@
 """Specialized agents for paper reproduction."""
 
-from .paper_analyzer import PaperAnalyzerAgent
-from .code_searcher import CodeSearcherAgent
-from .code_reproducer import CodeReproducerAgent
-from .code_verifier import CodeVerifierAgent
-from .code_debugger import CodeDebuggerAgent
+from .unified_paper_analyzer import UnifiedPaperAnalyzer
+from .environment_setup_agent import EnvironmentSetupAgent
+from .unified_reproduction_agent import UnifiedReproductionAgent
+from .discovery_agent import DiscoveryAgent
 
 __all__ = [
-    "PaperAnalyzerAgent",
-    "CodeSearcherAgent",
-    "CodeReproducerAgent",
-    "CodeVerifierAgent",
-    "CodeDebuggerAgent",
+    "UnifiedPaperAnalyzer",
+    "EnvironmentSetupAgent",
+    "UnifiedReproductionAgent",
+    "DiscoveryAgent",
 ]

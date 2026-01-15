@@ -1,0 +1,295 @@
+"""Metrics tracking for observability - timing, costs, and progress display."""
+
+import time
+import sys
+import os
+from datetime import timedelta
+from typing import Dict, Optional, List
+from dataclasses import dataclass, field
+from threading import Thread, Event
+
+
+@dataclass
+class PhaseMetrics:
+    """Metrics for a single workflow phase."""
+    name: str
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    llm_tokens_input: int = 0
+    llm_tokens_output: int = 0
+    experiment_wall_time: float = 0.0  # Time spent waiting on experiments
+    status: str = "pending"  # pending, running, completed, failed
+
+    @property
+    def duration(self) -> float:
+        """Calculate phase duration in seconds."""
+        if self.start_time is None:
+            return 0.0
+        end = self.end_time or time.time()
+        return end - self.start_time
+
+    @property
+    def llm_time(self) -> float:
+        """Estimated LLM time (duration minus experiment wait time)."""
+        return max(0, self.duration - self.experiment_wall_time)
+
+
+@dataclass
+class WorkflowMetrics:
+    """Aggregated metrics for entire workflow."""
+    phases: Dict[str, PhaseMetrics] = field(default_factory=dict)
+    workflow_start: Optional[float] = None
+    workflow_end: Optional[float] = None
+    total_llm_tokens_input: int = 0
+    total_llm_tokens_output: int = 0
+
+    # Cost rates (per 1M tokens) - configurable
+    input_cost_per_million: float = 3.00   # Default: GPT-4 Turbo input
+    output_cost_per_million: float = 15.00  # Default: GPT-4 Turbo output
+
+
+class MetricsTracker:
+    """Tracks timing, costs, and provides live progress display."""
+
+    PHASE_NAMES = [
+        "analyze_paper",
+        "decide_and_clone",
+        "environment_setup",
+        "unified_reproduction",
+        "extract_and_verify",
+        "generate_report"
+    ]
+
+    def __init__(
+        self,
+        enable_live_display: bool = True,
+        update_interval: int = 15,
+        input_cost_per_million: float = 3.00,
+        output_cost_per_million: float = 15.00
+    ):
+        """
+        Initialize MetricsTracker.
+
+        Args:
+            enable_live_display: Whether to show live progress updates
+            update_interval: Seconds between live display updates
+            input_cost_per_million: Cost per 1M input tokens
+            output_cost_per_million: Cost per 1M output tokens
+        """
+        # Load defaults from env if not provided
+        if input_cost_per_million == 3.00:  # Default value check
+             input_cost_per_million = float(os.getenv("LLM_INPUT_COST_PER_M", "3.00"))
+        if output_cost_per_million == 15.00: # Default value check
+             output_cost_per_million = float(os.getenv("LLM_OUTPUT_COST_PER_M", "15.00"))
+
+        self.metrics = WorkflowMetrics(
+            input_cost_per_million=input_cost_per_million,
+            output_cost_per_million=output_cost_per_million
+        )
+        self.enable_live_display = enable_live_display
+        self.update_interval = update_interval
+        self._stop_display = Event()
+        self._display_thread: Optional[Thread] = None
+        self._current_phase: Optional[str] = None
+
+        # Initialize phase metrics
+        for phase in self.PHASE_NAMES:
+            self.metrics.phases[phase] = PhaseMetrics(name=phase)
+
+    def start_workflow(self):
+        """Mark workflow start and begin live display if enabled."""
+        self.metrics.workflow_start = time.time()
+        if self.enable_live_display:
+            self._start_live_display()
+
+    def end_workflow(self):
+        """Mark workflow end and stop live display."""
+        self.metrics.workflow_end = time.time()
+        if self._display_thread:
+            self._stop_display.set()
+            self._display_thread.join(timeout=2)
+            # Clear the live status line
+            if self.enable_live_display:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
+
+    def start_phase(self, phase_name: str):
+        """Mark phase start."""
+        if phase_name in self.metrics.phases:
+            phase = self.metrics.phases[phase_name]
+            phase.start_time = time.time()
+            phase.status = "running"
+            self._current_phase = phase_name
+
+    def end_phase(self, phase_name: str, success: bool = True):
+        """Mark phase end."""
+        if phase_name in self.metrics.phases:
+            phase = self.metrics.phases[phase_name]
+            phase.end_time = time.time()
+            phase.status = "completed" if success else "failed"
+            if self._current_phase == phase_name:
+                self._current_phase = None
+
+    def record_experiment_time(self, phase_name: str, wall_time: float):
+        """Record time spent waiting on experiment execution."""
+        if phase_name in self.metrics.phases:
+            self.metrics.phases[phase_name].experiment_wall_time += wall_time
+
+    def record_tokens(self, input_tokens: int, output_tokens: int, phase_name: Optional[str] = None):
+        """Record token usage."""
+        self.metrics.total_llm_tokens_input += input_tokens
+        self.metrics.total_llm_tokens_output += output_tokens
+
+        phase = phase_name or self._current_phase
+        if phase and phase in self.metrics.phases:
+            self.metrics.phases[phase].llm_tokens_input += input_tokens
+            self.metrics.phases[phase].llm_tokens_output += output_tokens
+
+    def estimate_cost(self) -> float:
+        """Estimate total cost from token usage."""
+        input_cost = (self.metrics.total_llm_tokens_input / 1_000_000) * self.metrics.input_cost_per_million
+        output_cost = (self.metrics.total_llm_tokens_output / 1_000_000) * self.metrics.output_cost_per_million
+        return input_cost + output_cost
+
+    def get_total_duration(self) -> float:
+        """Get total workflow duration in seconds."""
+        if self.metrics.workflow_start is None:
+            return 0.0
+        end = self.metrics.workflow_end or time.time()
+        return end - self.metrics.workflow_start
+
+    def get_total_experiment_time(self) -> float:
+        """Get total experiment wait time across all phases."""
+        return sum(p.experiment_wall_time for p in self.metrics.phases.values())
+
+    def get_total_llm_time(self) -> float:
+        """Get estimated LLM/agent time (total - experiment time)."""
+        return max(0, self.get_total_duration() - self.get_total_experiment_time())
+
+    def _start_live_display(self):
+        """Start background thread for live progress updates."""
+        self._stop_display.clear()
+        self._display_thread = Thread(target=self._display_loop, daemon=True)
+        self._display_thread.start()
+
+    def _display_loop(self):
+        """Background loop that prints progress updates."""
+        while not self._stop_display.wait(timeout=self.update_interval):
+            self._print_live_status()
+
+    def _print_live_status(self):
+        """Print current progress status."""
+        elapsed = self.get_total_duration()
+        cost = self.estimate_cost()
+        total_tokens = self.metrics.total_llm_tokens_input + self.metrics.total_llm_tokens_output
+
+        # Build status line
+        status_parts = [
+            f"[{self._format_duration(elapsed)}]",
+            f"Phase: {self._current_phase or 'idle'}",
+            f"Est. Cost: ${cost:.4f}",
+            f"Tokens: {total_tokens:,}"
+        ]
+
+        # Print on new line with distinctive prefix (visible even with interleaved output)
+        status_line = " | ".join(status_parts)
+        status_line = " | ".join(status_parts)
+        print(f"\n⏱️  PROGRESS: {status_line}", flush=True)
+
+    def print_intermediate_summary(self):
+        """Print a brief summary of cost and time so far."""
+        if not self.enable_live_display:
+            return
+            
+        elapsed = self.get_total_duration()
+        cost = self.estimate_cost()
+        print(f"\n💰 Current Metrics: Duration: {self._format_duration(elapsed)} | Cost: ${cost:.4f}\n")
+
+    def _format_duration(self, seconds: float) -> str:
+        """Format duration as HH:MM:SS."""
+        return str(timedelta(seconds=int(seconds)))
+
+    def get_summary(self) -> str:
+        """Generate comprehensive final summary report."""
+        lines = []
+        lines.append("")
+        lines.append("=" * 70)
+        lines.append("WORKFLOW METRICS SUMMARY")
+        lines.append("=" * 70)
+
+        # Total duration
+        total_duration = self.get_total_duration()
+        lines.append(f"\nTotal Duration: {self._format_duration(total_duration)}")
+
+        # Phase breakdown
+        lines.append("\n--- Phase Breakdown ---")
+        for phase_name in self.PHASE_NAMES:
+            phase = self.metrics.phases[phase_name]
+            if phase.start_time is not None:
+                status_icon = {
+                    "completed": " OK ",
+                    "failed": "FAIL",
+                    "running": " .. ",
+                    "pending": " -- "
+                }
+                icon = status_icon.get(phase.status, " ?? ")
+                lines.append(
+                    f"  {phase_name:25} [{icon}] "
+                    f"Duration: {self._format_duration(phase.duration):>10} "
+                    f"(Experiment: {self._format_duration(phase.experiment_wall_time)})"
+                )
+            else:
+                lines.append(f"  {phase_name:25} [ -- ] Not started")
+
+        # Time breakdown
+        total_experiment_time = self.get_total_experiment_time()
+        llm_time = self.get_total_llm_time()
+        lines.append(f"\n--- Time Breakdown ---")
+        lines.append(f"  LLM/Agent Time:     {self._format_duration(llm_time)}")
+        lines.append(f"  Experiment Time:    {self._format_duration(total_experiment_time)}")
+        lines.append(f"  Total:              {self._format_duration(total_duration)}")
+
+        # Cost breakdown
+        lines.append(f"\n--- Cost Estimate ---")
+        lines.append(f"  Input Tokens:  {self.metrics.total_llm_tokens_input:>12,}")
+        lines.append(f"  Output Tokens: {self.metrics.total_llm_tokens_output:>12,}")
+        lines.append(f"  Estimated Cost: ${self.estimate_cost():.4f}")
+        lines.append(
+            f"  (Rates: ${self.metrics.input_cost_per_million}/M input, "
+            f"${self.metrics.output_cost_per_million}/M output)"
+        )
+
+        lines.append("")
+        lines.append("=" * 70)
+        return "\n".join(lines)
+
+    def get_phase_stats(self, phase_name: str) -> Optional[Dict]:
+        """Get stats for a specific phase."""
+        if phase_name not in self.metrics.phases:
+            return None
+
+        phase = self.metrics.phases[phase_name]
+        return {
+            "name": phase.name,
+            "status": phase.status,
+            "duration": phase.duration,
+            "experiment_wall_time": phase.experiment_wall_time,
+            "llm_time": phase.llm_time,
+            "llm_tokens_input": phase.llm_tokens_input,
+            "llm_tokens_output": phase.llm_tokens_output
+        }
+
+    def get_all_stats(self) -> Dict:
+        """Get comprehensive stats dictionary."""
+        return {
+            "total_duration": self.get_total_duration(),
+            "total_experiment_time": self.get_total_experiment_time(),
+            "total_llm_time": self.get_total_llm_time(),
+            "total_tokens_input": self.metrics.total_llm_tokens_input,
+            "total_tokens_output": self.metrics.total_llm_tokens_output,
+            "estimated_cost": self.estimate_cost(),
+            "phases": {
+                name: self.get_phase_stats(name)
+                for name in self.PHASE_NAMES
+            }
+        }

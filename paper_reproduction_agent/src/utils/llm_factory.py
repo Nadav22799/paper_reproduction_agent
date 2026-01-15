@@ -15,7 +15,7 @@ import os
 from typing import Optional
 
 
-def create_llm(temperature: float = 0.1):
+def create_llm(temperature: float = 0.3):
     """
     Create LLM instance based on available API keys or local model.
 
@@ -27,14 +27,17 @@ def create_llm(temperature: float = 0.1):
     5. Anthropic (if ANTHROPIC_API_KEY is provided)
 
     Args:
-        temperature: Temperature for LLM generation
-
+        temperature: Temperature for LLM generation (defaults to env var or 0.3)
+    
     Returns:
         Configured LLM instance
 
     Raises:
         ValueError: If no API keys are available and local model not configured
     """
+    # Load temperature from env if not explicitly provided (or if default)
+    if temperature == 0.3:
+        temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
     # Check for local LLM first (highest priority - no rate limits!)
     use_local = os.getenv("USE_LOCAL_LLM", "false").lower() == "true"
     if use_local:
@@ -117,6 +120,7 @@ def create_llm(temperature: float = 0.1):
 
             return ChatGoogleGenerativeAI(
                 model=model,
+                include_thoughts=True,
                 google_api_key=google_key,
                 temperature=temperature,
             )

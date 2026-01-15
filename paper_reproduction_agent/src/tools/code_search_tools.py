@@ -376,6 +376,14 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
                 query = f"{pattern} filename:readme"
                 code_results = g.search_code(query=query)
 
+                # Check if we have results before iterating
+                try:
+                    total_count = code_results.totalCount
+                    if total_count == 0:
+                        continue  # No results for this pattern, try next
+                except:
+                    pass  # If we can't check count, try iterating anyway
+
                 for code in code_results[:max_results * 2]:  # Get more to filter
                     try:
                         repo = code.repository
@@ -427,7 +435,13 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
                 print(f"⚠️  Rate limit hit for pattern: {pattern}")
                 break
             except Exception as e:
-                print(f"⚠️  Search failed for pattern {pattern}: {str(e)[:50]}")
+                # Don't show error for empty results or index errors (common when no matches)
+                error_msg = str(e)
+                if "list index out of range" in error_msg.lower():
+                    # This usually means no results for this pattern, which is fine
+                    pass
+                else:
+                    print(f"⚠️  Search failed for pattern {pattern}: {error_msg[:50]}")
                 continue
 
         results = list(all_repos.values())
@@ -594,9 +608,14 @@ def web_search_for_implementation(
     import json
 
     try:
-        import google.generativeai as genai
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            return [{"error": "google-genai not installed. Run: pip install google-genai"}]
+
     except ImportError:
-        return [{"error": "google-generativeai not installed. Run: pip install google-generativeai"}]
+            return [{"error": "google-genai not found. Please install `google-genai`."}]
 
     result = {
         "candidates": [],
@@ -609,7 +628,7 @@ def web_search_for_implementation(
         if not api_key:
             return [{"error": "GEMINI_API_KEY not found in environment"}]
 
-        genai.configure(api_key=api_key)
+        client = genai.Client(api_key=api_key)
 
         # Build search query
         search_terms = [f'"{paper_title}"', "github", "implementation", "code"]
@@ -659,11 +678,12 @@ If no high-confidence candidates are found, return an empty candidates array.
 Only include repositories with GitHub URLs."""
 
         # Use Gemini with search grounding
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-
-        response = model.generate_content(
-            prompt,
-            tools='google_search_retrieval'
+        response = client.models.generate_content(
+            model='gemini-2.0-flash-exp',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
 
         if response.text:
