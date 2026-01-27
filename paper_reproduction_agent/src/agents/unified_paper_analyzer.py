@@ -29,16 +29,16 @@ class UnifiedPaperAnalyzer:
             Extracted text as string
         """
         response_text = ""
-        if hasattr(response, 'content'):
+        if hasattr(response, "content"):
             # Handle case where content might be a list
             if isinstance(response.content, list):
                 # Extract text from list of content blocks
                 for item in response.content:
-                    if isinstance(item, dict) and 'text' in item:
-                        response_text += item['text']
+                    if isinstance(item, dict) and "text" in item:
+                        response_text += item["text"]
                     elif isinstance(item, str):
                         response_text += item
-                    elif hasattr(item, 'text'):
+                    elif hasattr(item, "text"):
                         response_text += item.text
             else:
                 response_text = str(response.content)
@@ -120,32 +120,49 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
         try:
             # Setup callback for token tracking
             from ..utils.logging_callback import LoggingCallbackHandler
-            callbacks = [LoggingCallbackHandler(verbose=True, metrics_tracker=self.metrics_tracker)] if self.metrics_tracker else []
+
+            callbacks = (
+                [
+                    LoggingCallbackHandler(
+                        verbose=True, metrics_tracker=self.metrics_tracker
+                    )
+                ]
+                if self.metrics_tracker
+                else []
+            )
 
             # Get structured extraction
             result = self.llm.invoke(messages, config={"callbacks": callbacks})
             response_text = self._extract_text_from_response(result)
 
             # Clean up thinking tags and tool calls
-            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
-            response_text = re.sub(r'<tool_call>.*?</tool_call>', '', response_text, flags=re.DOTALL)
+            response_text = re.sub(
+                r"<think>.*?</think>", "", response_text, flags=re.DOTALL
+            )
+            response_text = re.sub(
+                r"<tool_call>.*?</tool_call>", "", response_text, flags=re.DOTALL
+            )
             response_text = response_text.strip()
 
             print(f"\n📄 Paper analysis complete ({len(response_text)} chars)")
             print(f"Preview: {response_text[:500]}...\n")
 
             # Extract JSON from response (might be wrapped in markdown code blocks)
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            json_match = re.search(
+                r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL
+            )
             if not json_match:
-                json_match = re.search(r'```\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+                json_match = re.search(
+                    r"```\s*(\{.*?\})\s*```", response_text, re.DOTALL
+                )
             if not json_match:
-                json_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
+                json_match = re.search(r"(\{.*\})", response_text, re.DOTALL)
 
             structured_data = {}
             if json_match:
                 try:
                     structured_data = json.loads(json_match.group(1))
-                    print(f"✅ Successfully parsed JSON response")
+                    print("✅ Successfully parsed JSON response")
                 except json.JSONDecodeError as e:
                     print(f"⚠️  JSON parsing failed: {e}")
                     structured_data = {}
@@ -159,12 +176,21 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
                 if repo and isinstance(repo, str):
                     if not repo.startswith("http"):
                         # Check if it looks like a valid repo URL
-                        if any(platform in repo.lower() for platform in ["github.com", "gitlab.com", "bitbucket.org"]):
+                        if any(
+                            platform in repo.lower()
+                            for platform in [
+                                "github.com",
+                                "gitlab.com",
+                                "bitbucket.org",
+                            ]
+                        ):
                             repo = f"https://{repo}"
                     normalized_llm_repos.append(repo)
 
             # Also extract URLs from response text using regex
-            github_pattern = r'https?://(?:github|gitlab|bitbucket)\.(?:com|org)/[\w\-\.]+/[\w\-\.]+'
+            github_pattern = (
+                r"https?://(?:github|gitlab|bitbucket)\.(?:com|org)/[\w\-\.]+/[\w\-\.]+"
+            )
             llm_found_urls = re.findall(github_pattern, response_text, re.IGNORECASE)
 
             # Combine all sources and deduplicate
@@ -184,19 +210,22 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
                 "github_repos": all_repos,
                 "results_to_reproduce": {
                     "tables": result_tables,  # Full table structure
-                    "metrics": all_results,    # Flattened list for easy access
+                    "metrics": all_results,  # Flattened list for easy access
                 },
                 "core_contribution": structured_data.get("core_contribution", ""),
                 "datasets": structured_data.get("datasets", []),
-                "implementation_details": structured_data.get("implementation_details", ""),
+                "implementation_details": structured_data.get(
+                    "implementation_details", ""
+                ),
                 "context_summary": f"Paper: {paper_title}. Found {len(all_repos)} code repositories. Extracted {len(all_results)} metrics from {len(result_tables)} tables.",
                 "raw_analysis": response_text,
-                "structured_data": structured_data
+                "structured_data": structured_data,
             }
 
         except Exception as e:
             print(f"⚠️  LLM analysis failed: {str(e)[:200]}")
             import traceback
+
             traceback.print_exc()
             return {
                 "github_repos": github_urls,  # At least return regex results
@@ -206,7 +235,7 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
                 "implementation_details": "",
                 "context_summary": f"Paper: {paper_title}. Found {len(github_urls)} code repositories.",
                 "raw_analysis": "",
-                "error": str(e)
+                "error": str(e),
             }
 
     def _execute_parsing_code(self, code_response: str, raw_text: str) -> Dict:
@@ -221,12 +250,12 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
             Dictionary with structured results
         """
         # Extract Python code from markdown blocks
-        code_pattern = r'```python\n(.*?)```'
+        code_pattern = r"```python\n(.*?)```"
         code_matches = re.findall(code_pattern, code_response, re.DOTALL)
 
         if not code_matches:
             # Try without markdown
-            code_pattern = r'```\n(.*?)```'
+            code_pattern = r"```\n(.*?)```"
             code_matches = re.findall(code_pattern, code_response, re.DOTALL)
 
         if not code_matches:
@@ -239,9 +268,9 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
         try:
             # Create execution environment with raw_text
             exec_globals = {
-                'raw_text': raw_text,
-                're': re,
-                'json': json,
+                "raw_text": raw_text,
+                "re": re,
+                "json": json,
             }
             exec_locals = {}
 
@@ -249,14 +278,14 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
             exec(code, exec_globals, exec_locals)
 
             # Look for 'results' variable or return value
-            if 'results' in exec_locals:
-                results = exec_locals['results']
-                print(f"✅ Code executed successfully, got structured results")
+            if "results" in exec_locals:
+                results = exec_locals["results"]
+                print("✅ Code executed successfully, got structured results")
                 return results
             else:
                 # Check if there's any dict in locals
                 for key, value in exec_locals.items():
-                    if isinstance(value, dict) and key != '__builtins__':
+                    if isinstance(value, dict) and key != "__builtins__":
                         print(f"✅ Code executed, using variable '{key}' as results")
                         return value
 
@@ -266,6 +295,7 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
         except Exception as e:
             print(f"❌ Code execution failed: {str(e)[:200]}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -279,9 +309,18 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
         text_lower = paper_text.lower()
 
         platforms = [
-            ('github.com', r'https?://(?:www\.)?github\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)'),
-            ('gitlab.com', r'https?://(?:www\.)?gitlab\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)'),
-            ('bitbucket.org', r'https?://(?:www\.)?bitbucket\.org/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)'),
+            (
+                "github.com",
+                r"https?://(?:www\.)?github\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)",
+            ),
+            (
+                "gitlab.com",
+                r"https?://(?:www\.)?gitlab\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)",
+            ),
+            (
+                "bitbucket.org",
+                r"https?://(?:www\.)?bitbucket\.org/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)",
+            ),
         ]
 
         for platform_name, url_pattern in platforms:
@@ -312,12 +351,8 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
         # Remove duplicates
         return list(set(all_urls))
 
-
     def enhanced_repo_discovery(
-        self,
-        arxiv_id: str = None,
-        paper_title: str = None,
-        authors: List[str] = None
+        self, arxiv_id: str = None, paper_title: str = None, authors: List[str] = None
     ) -> List[str]:
         """
         Enhanced repository discovery using multiple methods.
@@ -339,7 +374,7 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
         from ..tools.code_search_tools import (
             search_github_for_arxiv_reference,
             search_github_by_paper_name,
-            web_search_for_implementation
+            web_search_for_implementation,
         )
 
         discovered_repos = []  # List of dicts with full metadata
@@ -347,50 +382,72 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
 
         # Method 1: Search GitHub for repos that reference the arXiv paper
         if arxiv_id:
-            print(f"🔍 Method 1: Searching GitHub for repos referencing arXiv:{arxiv_id}...")
+            print(
+                f"🔍 Method 1: Searching GitHub for repos referencing arXiv:{arxiv_id}..."
+            )
             try:
                 arxiv_results = search_github_for_arxiv_reference(arxiv_id)
 
                 for result in arxiv_results:
                     url = result.get("url")
-                    if url and result.get("confidence") == "high" and url not in discovered_urls:
+                    if (
+                        url
+                        and result.get("confidence") == "high"
+                        and url not in discovered_urls
+                    ):
                         discovered_urls.add(url)
-                        discovered_repos.append({
-                            "url": url,
-                            "match_file": result.get("match_file", "README"),
-                            "confidence": result.get("confidence", "high"),
-                            "stars": result.get("stars", 0),  # Pass through star count
-                            "source": "arxiv_reference"
-                        })
+                        discovered_repos.append(
+                            {
+                                "url": url,
+                                "match_file": result.get("match_file", "README"),
+                                "confidence": result.get("confidence", "high"),
+                                "stars": result.get(
+                                    "stars", 0
+                                ),  # Pass through star count
+                                "source": "arxiv_reference",
+                            }
+                        )
                         stars = result.get("stars", 0)
                         stars_str = f" [{stars:,} ⭐]" if stars else ""
-                        print(f"   ✅ Found: {url}{stars_str} (arXiv reference in {result.get('match_file', 'README')})")
+                        print(
+                            f"   ✅ Found: {url}{stars_str} (arXiv reference in {result.get('match_file', 'README')})"
+                        )
 
             except Exception as e:
                 print(f"   ⚠️  GitHub arXiv search failed: {str(e)[:50]}")
 
         # If we found high-confidence repos from arXiv search, return them
         if discovered_repos:
-            print(f"📚 Enhanced discovery found {len(discovered_repos)} repo(s) via arXiv reference")
+            print(
+                f"📚 Enhanced discovery found {len(discovered_repos)} repo(s) via arXiv reference"
+            )
             return discovered_repos
 
         # Method 2: Search GitHub by paper/method name
         if paper_title:
-            print(f"🔍 Method 2: Searching GitHub for repos matching paper name...")
+            print("🔍 Method 2: Searching GitHub for repos matching paper name...")
             try:
                 name_results = search_github_by_paper_name(paper_title)
 
                 for result in name_results:
                     url = result.get("url")
-                    if url and result.get("is_exact_match") and url not in discovered_urls:
+                    if (
+                        url
+                        and result.get("is_exact_match")
+                        and url not in discovered_urls
+                    ):
                         discovered_urls.add(url)
-                        discovered_repos.append({
-                            "url": url,
-                            "matched_term": result.get("matched_term", ""),
-                            "confidence": result.get("confidence", "medium"),
-                            "stars": result.get("stars", 0),  # Pass through star count
-                            "source": "name_match"
-                        })
+                        discovered_repos.append(
+                            {
+                                "url": url,
+                                "matched_term": result.get("matched_term", ""),
+                                "confidence": result.get("confidence", "medium"),
+                                "stars": result.get(
+                                    "stars", 0
+                                ),  # Pass through star count
+                                "source": "name_match",
+                            }
+                        )
                         term = result.get("matched_term", "")
                         stars = result.get("stars", 0)
                         stars_str = f" [{stars:,} ⭐]" if stars else ""
@@ -401,29 +458,35 @@ Be thorough - extract ALL result tables and ALL datasets mentioned. If informati
 
         # If we found repos from name search, return them
         if discovered_repos:
-            print(f"📚 Enhanced discovery found {len(discovered_repos)} repo(s) via name match")
+            print(
+                f"📚 Enhanced discovery found {len(discovered_repos)} repo(s) via name match"
+            )
             return discovered_repos
 
         # Method 3: Web search with LLM evaluation
         if paper_title:
-            print(f"🌐 Method 3: Searching web for implementations...")
+            print("🌐 Method 3: Searching web for implementations...")
             try:
                 web_results = web_search_for_implementation(
-                    paper_title=paper_title,
-                    arxiv_id=arxiv_id,
-                    authors=authors
+                    paper_title=paper_title, arxiv_id=arxiv_id, authors=authors
                 )
 
                 for result in web_results:
                     url = result.get("url")
-                    if url and result.get("confidence") == "high" and url not in discovered_urls:
+                    if (
+                        url
+                        and result.get("confidence") == "high"
+                        and url not in discovered_urls
+                    ):
                         discovered_urls.add(url)
-                        discovered_repos.append({
-                            "url": url,
-                            "reason": result.get("reason", "LLM evaluation"),
-                            "confidence": result.get("confidence", "high"),
-                            "source": "web_search"
-                        })
+                        discovered_repos.append(
+                            {
+                                "url": url,
+                                "reason": result.get("reason", "LLM evaluation"),
+                                "confidence": result.get("confidence", "high"),
+                                "source": "web_search",
+                            }
+                        )
                         reason = result.get("reason", "LLM evaluation")
                         print(f"   ✅ Found: {url} ({reason[:50]})")
 

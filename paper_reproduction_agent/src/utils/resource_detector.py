@@ -24,11 +24,13 @@ def detect_system_resources() -> Dict:
         "gpu_names": [],
         "total_ram_gb": 0.0,
         "cpu_count": 0,
-        "resource_tier": "low"
+        "resource_tier": "low",
     }
 
     # Detect GPUs
-    resources["gpu_available"], resources["gpu_count"], resources["gpu_names"] = _detect_gpus()
+    resources["gpu_available"], resources["gpu_count"], resources["gpu_names"] = (
+        _detect_gpus()
+    )
 
     # Detect RAM
     resources["total_ram_gb"] = _detect_ram()
@@ -50,10 +52,14 @@ def _detect_gpus() -> tuple:
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
         if result.returncode == 0:
-            gpu_names = [name.strip() for name in result.stdout.strip().split("\n") if name.strip()]
+            gpu_names = [
+                name.strip()
+                for name in result.stdout.strip().split("\n")
+                if name.strip()
+            ]
             gpu_count = len(gpu_names)
             return (gpu_count > 0, gpu_count, gpu_names)
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
@@ -62,6 +68,7 @@ def _detect_gpus() -> tuple:
     # Try PyTorch as fallback
     try:
         import torch
+
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
             gpu_names = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
@@ -77,6 +84,7 @@ def _detect_ram() -> float:
     try:
         # Try using psutil
         import psutil
+
         total_ram = psutil.virtual_memory().total / (1024**3)  # Convert to GB
         return round(total_ram, 2)
     except ImportError:
@@ -127,12 +135,12 @@ def _determine_tier(resources: Dict) -> str:
 def get_resource_summary(resources: Dict) -> str:
     """Generate human-readable resource summary."""
     lines = []
-    lines.append(f"💻 System Resources Detected:")
+    lines.append("💻 System Resources Detected:")
     lines.append(f"   GPU: {'Yes' if resources['gpu_available'] else 'No'}")
 
-    if resources['gpu_available']:
+    if resources["gpu_available"]:
         lines.append(f"   GPU Count: {resources['gpu_count']}")
-        for i, name in enumerate(resources['gpu_names']):
+        for i, name in enumerate(resources["gpu_names"]):
             lines.append(f"      GPU {i}: {name}")
 
     lines.append(f"   RAM: {resources['total_ram_gb']:.1f} GB")

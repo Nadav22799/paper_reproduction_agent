@@ -5,7 +5,6 @@ to avoid getting stuck in dependency hell loops.
 """
 
 import re
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -34,7 +33,7 @@ class ErrorPatternDetector:
             return False, None
 
         # Check for repeated identical errors
-        recent_errors = self.error_history[-self.max_same_error:]
+        recent_errors = self.error_history[-self.max_same_error :]
         if len(set(recent_errors)) == 1:
             return True, f"Same error repeated {self.max_same_error} times"
 
@@ -45,7 +44,9 @@ class ErrorPatternDetector:
 
         # Check for unresolvable dependency conflicts
         if len(self.error_history) >= 5:
-            conflict_count = sum(1 for e in self.error_history if 'conflict' in e.lower())
+            conflict_count = sum(
+                1 for e in self.error_history if "conflict" in e.lower()
+            )
             if conflict_count >= 3:
                 return True, "Multiple dependency conflicts - likely unresolvable"
 
@@ -54,8 +55,8 @@ class ErrorPatternDetector:
     def _normalize_error(self, error: str) -> str:
         """Normalize error message for comparison."""
         # Remove version numbers and package names to detect pattern
-        normalized = re.sub(r'\d+\.\d+\.\d+', 'X.X.X', error.lower())
-        normalized = re.sub(r'["\']([^"\']+)["\']', 'PACKAGE', normalized)
+        normalized = re.sub(r"\d+\.\d+\.\d+", "X.X.X", error.lower())
+        normalized = re.sub(r'["\']([^"\']+)["\']', "PACKAGE", normalized)
 
         # Extract key error phrases
         key_phrases = [
@@ -118,7 +119,7 @@ class DependencyResolver:
             "dependencies_installed": False,
             "errors": [],
             "warnings": [],
-            "attempts": []
+            "attempts": [],
         }
 
         # Strategy 0: Try setup.py installation first (most common for research repos)
@@ -186,7 +187,9 @@ class DependencyResolver:
             result["success"] = True
             result["strategy_used"] = "unpinned_versions"
             result["dependencies_installed"] = True
-            result["warnings"].append("Installed without version pins - results may differ")
+            result["warnings"].append(
+                "Installed without version pins - results may differ"
+            )
             return result
 
         self.error_detector.add_error(strategy_result.get("error", ""))
@@ -203,26 +206,29 @@ class DependencyResolver:
             return {
                 "success": False,
                 "strategy": "setup.py",
-                "error": "No setup.py found"
+                "error": "No setup.py found",
             }
 
         try:
             # Read setup.py to check for Python 2
-            setup_content = setup_file.read_text(encoding='utf-8', errors='ignore')
+            setup_content = setup_file.read_text(encoding="utf-8", errors="ignore")
 
             # Check for Python 2 indicators
-            if 'python_requires' in setup_content:
+            if "python_requires" in setup_content:
                 # Extract python_requires value
                 import re
-                match = re.search(r'python_requires\s*=\s*["\']([^"\']+)["\']', setup_content)
+
+                match = re.search(
+                    r'python_requires\s*=\s*["\']([^"\']+)["\']', setup_content
+                )
                 if match:
                     python_req = match.group(1)
                     # Check if it requires Python 2
-                    if '2.' in python_req and '3.' not in python_req:
+                    if "2." in python_req and "3." not in python_req:
                         return {
                             "success": False,
                             "strategy": "setup.py",
-                            "error": f"Requires Python 2: {python_req}"
+                            "error": f"Requires Python 2: {python_req}",
                         }
 
             return {
@@ -230,15 +236,11 @@ class DependencyResolver:
                 "strategy": "setup.py",
                 "setup_file": str(setup_file),
                 "command": "pip install -e .",
-                "note": "Installing in editable mode with setup.py"
+                "note": "Installing in editable mode with setup.py",
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "strategy": "setup.py",
-                "error": str(e)
-            }
+            return {"success": False, "strategy": "setup.py", "error": str(e)}
 
     def _try_original_requirements(self) -> Dict:
         """Try installing with original requirements."""
@@ -249,34 +251,30 @@ class DependencyResolver:
             return {
                 "success": False,
                 "strategy": "original",
-                "error": "No requirements file found"
+                "error": "No requirements file found",
             }
 
         # Read and check requirements
         try:
-            requirements = req_file.read_text(encoding='utf-8', errors='ignore')
+            requirements = req_file.read_text(encoding="utf-8", errors="ignore")
 
             # Check for obvious Python 2 incompatibilities
             if self._has_python2_packages(requirements):
                 return {
                     "success": False,
                     "strategy": "original",
-                    "error": "Requirements contain Python 2-only packages"
+                    "error": "Requirements contain Python 2-only packages",
                 }
 
             return {
                 "success": False,  # Will be determined by actual installation
                 "strategy": "original",
                 "requirements_file": str(req_file),
-                "command": f"pip install -r {req_file.name}"
+                "command": f"pip install -r {req_file.name}",
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "strategy": "original",
-                "error": str(e)
-            }
+            return {"success": False, "strategy": "original", "error": str(e)}
 
     def _try_relaxed_versions(self) -> Dict:
         """Try installing with relaxed version constraints."""
@@ -286,31 +284,27 @@ class DependencyResolver:
             return {
                 "success": False,
                 "strategy": "relaxed",
-                "error": "No requirements file found"
+                "error": "No requirements file found",
             }
 
         try:
-            requirements = req_file.read_text(encoding='utf-8', errors='ignore')
+            requirements = req_file.read_text(encoding="utf-8", errors="ignore")
             relaxed = self._relax_requirements(requirements)
 
             # Create temporary relaxed requirements file
             temp_req_file = self.repo_path / "requirements_relaxed.txt"
-            temp_req_file.write_text(relaxed, encoding='utf-8')
+            temp_req_file.write_text(relaxed, encoding="utf-8")
 
             return {
                 "success": False,  # Will be determined by actual installation
                 "strategy": "relaxed",
                 "requirements_file": str(temp_req_file),
                 "command": f"pip install -r {temp_req_file.name}",
-                "modifications": "Relaxed version constraints (e.g., ==1.15.0 -> >=1.15.0,<2.0)"
+                "modifications": "Relaxed version constraints (e.g., ==1.15.0 -> >=1.15.0,<2.0)",
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "strategy": "relaxed",
-                "error": str(e)
-            }
+            return {"success": False, "strategy": "relaxed", "error": str(e)}
 
     def _try_unpinned_versions(self) -> Dict:
         """Try installing packages without version constraints."""
@@ -320,35 +314,35 @@ class DependencyResolver:
             return {
                 "success": False,
                 "strategy": "unpinned",
-                "error": "No requirements file found"
+                "error": "No requirements file found",
             }
 
         try:
-            requirements = req_file.read_text(encoding='utf-8', errors='ignore')
+            requirements = req_file.read_text(encoding="utf-8", errors="ignore")
 
             # Extract just package names (remove versions)
             packages = []
-            for line in requirements.strip().split('\n'):
+            for line in requirements.strip().split("\n"):
                 line = line.strip()
-                if line and not line.startswith('#'):
+                if line and not line.startswith("#"):
                     # Extract package name before any operator
-                    match = re.match(r'^([a-zA-Z0-9_-]+)', line)
+                    match = re.match(r"^([a-zA-Z0-9_-]+)", line)
                     if match:
                         pkg = match.group(1)
                         # Skip Python 2 only packages
-                        if pkg not in ['futures', 'functools32']:
+                        if pkg not in ["futures", "functools32"]:
                             packages.append(pkg)
 
             if not packages:
                 return {
                     "success": False,
                     "strategy": "unpinned",
-                    "error": "No valid packages found"
+                    "error": "No valid packages found",
                 }
 
             # Create temporary unpinned requirements
             temp_req_file = self.repo_path / "requirements_unpinned.txt"
-            temp_req_file.write_text('\n'.join(packages), encoding='utf-8')
+            temp_req_file.write_text("\n".join(packages), encoding="utf-8")
 
             return {
                 "success": False,  # Will be determined by actual installation
@@ -356,15 +350,11 @@ class DependencyResolver:
                 "requirements_file": str(temp_req_file),
                 "command": f"pip install -r {temp_req_file.name}",
                 "modifications": "Removed all version constraints - using latest compatible versions",
-                "warning": "Results may differ significantly from paper due to version differences"
+                "warning": "Results may differ significantly from paper due to version differences",
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "strategy": "unpinned",
-                "error": str(e)
-            }
+            return {"success": False, "strategy": "unpinned", "error": str(e)}
 
     def _try_prebuilt_wheels(self) -> Dict:
         """
@@ -378,24 +368,24 @@ class DependencyResolver:
 
         # Packages that commonly have compilation issues
         problematic_packages = [
-            'tokenizers',      # Rust compilation issues
-            'sentencepiece',   # C++ compilation issues
-            'apex',            # CUDA/C++ issues
-            'fairseq',         # C++ extensions
-            'pycocotools',     # C extensions
+            "tokenizers",  # Rust compilation issues
+            "sentencepiece",  # C++ compilation issues
+            "apex",  # CUDA/C++ issues
+            "fairseq",  # C++ extensions
+            "pycocotools",  # C extensions
         ]
 
         # Check if any problematic packages are in requirements
         has_problematic = False
         if req_file:
-            requirements = req_file.read_text(encoding='utf-8', errors='ignore')
+            requirements = req_file.read_text(encoding="utf-8", errors="ignore")
             for pkg in problematic_packages:
                 if pkg in requirements.lower():
                     has_problematic = True
                     break
 
         if setup_file.exists() and not has_problematic:
-            setup_content = setup_file.read_text(encoding='utf-8', errors='ignore')
+            setup_content = setup_file.read_text(encoding="utf-8", errors="ignore")
             for pkg in problematic_packages:
                 if pkg in setup_content.lower():
                     has_problematic = True
@@ -405,7 +395,7 @@ class DependencyResolver:
             return {
                 "success": False,
                 "strategy": "prebuilt_wheels",
-                "error": "No problematic packages detected - skipping this strategy"
+                "error": "No problematic packages detected - skipping this strategy",
             }
 
         # Build command with --only-binary for problematic packages
@@ -421,7 +411,7 @@ class DependencyResolver:
             return {
                 "success": False,
                 "strategy": "prebuilt_wheels",
-                "error": "No requirements file or setup.py found"
+                "error": "No requirements file or setup.py found",
             }
 
         return {
@@ -429,7 +419,7 @@ class DependencyResolver:
             "strategy": "prebuilt_wheels",
             "command": command,
             "modifications": f"Using --only-binary for: {', '.join(problematic_packages)}",
-            "note": "This avoids Rust/C++ compilation by using pre-built wheels"
+            "note": "This avoids Rust/C++ compilation by using pre-built wheels",
         }
 
     def _find_requirements_file(self) -> Optional[Path]:
@@ -439,7 +429,7 @@ class DependencyResolver:
             "requirements-dev.txt",
             "requirements-test.txt",
             "requirements/base.txt",
-            "requirements/prod.txt"
+            "requirements/prod.txt",
         ]
 
         for candidate in candidates:
@@ -451,10 +441,10 @@ class DependencyResolver:
 
     def _has_python2_packages(self, requirements: str) -> bool:
         """Check if requirements contain Python 2-only packages."""
-        python2_packages = ['futures', 'functools32', 'configparser']
+        python2_packages = ["futures", "functools32", "configparser"]
 
         for pkg in python2_packages:
-            if re.search(rf'\b{pkg}\b', requirements, re.IGNORECASE):
+            if re.search(rf"\b{pkg}\b", requirements, re.IGNORECASE):
                 return True
 
         return False
@@ -469,18 +459,18 @@ class DependencyResolver:
         """
         lines = []
 
-        for line in requirements.strip().split('\n'):
+        for line in requirements.strip().split("\n"):
             original_line = line
             line = line.strip()
 
             # Skip empty lines and comments
-            if not line or line.startswith('#'):
+            if not line or line.startswith("#"):
                 lines.append(original_line)
                 continue
 
             # Handle == constraints
-            if '==' in line:
-                match = re.match(r'^([a-zA-Z0-9_-]+)==(\d+)\.(\d+)\.(\d+)', line)
+            if "==" in line:
+                match = re.match(r"^([a-zA-Z0-9_-]+)==(\d+)\.(\d+)\.(\d+)", line)
                 if match:
                     pkg, major, minor, patch = match.groups()
                     # Relax to allow any version in same major version
@@ -490,14 +480,14 @@ class DependencyResolver:
                     continue
 
             # Handle >= with specific upper bound
-            if '>=' in line and '<' in line:
+            if ">=" in line and "<" in line:
                 # Already has bounds, just keep it
                 lines.append(line)
                 continue
 
             # Handle >= without upper bound
-            if '>=' in line and '<' not in line:
-                match = re.match(r'^([a-zA-Z0-9_-]+)>=(\d+)\.(\d+)', line)
+            if ">=" in line and "<" not in line:
+                match = re.match(r"^([a-zA-Z0-9_-]+)>=(\d+)\.(\d+)", line)
                 if match:
                     pkg, major, minor = match.groups()
                     # Add reasonable upper bound
@@ -509,7 +499,7 @@ class DependencyResolver:
             # Default: keep original line
             lines.append(line)
 
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
 
 def detect_installation_error_type(error_output: str) -> Dict:
@@ -522,16 +512,14 @@ def detect_installation_error_type(error_output: str) -> Dict:
     Returns:
         Dict with error_type and suggestions
     """
-    result = {
-        "error_type": "unknown",
-        "suggestions": [],
-        "is_fatal": False
-    }
+    result = {"error_type": "unknown", "suggestions": [], "is_fatal": False}
 
     error_lower = error_output.lower()
 
     # Python version incompatibility
-    if re.search(r"requires python|python.*is required|not available for python", error_lower):
+    if re.search(
+        r"requires python|python.*is required|not available for python", error_lower
+    ):
         result["error_type"] = "python_version_incompatibility"
         result["is_fatal"] = True
         result["suggestions"] = [
@@ -541,7 +529,10 @@ def detect_installation_error_type(error_output: str) -> Dict:
         return result
 
     # Package not found
-    if "could not find a version" in error_lower or "no matching distribution" in error_lower:
+    if (
+        "could not find a version" in error_lower
+        or "no matching distribution" in error_lower
+    ):
         result["error_type"] = "package_not_found"
         result["suggestions"] = [
             "Package may be deprecated or renamed - check PyPI for alternatives",

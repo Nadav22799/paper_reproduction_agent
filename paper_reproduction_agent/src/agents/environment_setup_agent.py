@@ -9,9 +9,7 @@ This agent's sole responsibility is to:
 The unified reproduction agent can then run experiments in a clean, conflict-free environment.
 """
 
-import os
 from typing import Dict, Any, Optional
-from pathlib import Path
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from ..tools.code_execution_tools import (
@@ -40,6 +38,9 @@ class EnvironmentSetupAgent:
 
         self.system_prompt = """You are an Environment Setup Specialist. Your ONLY job is to prepare a working environment for running ML experiments.
 
+GOAL: REPRODUCE PAPER RESULTS
+You are part of an automated system designed to reproduce the results of a scientific paper. Your individual tasks must always serve this ultimate goal.
+
 ═══════════════════════════════════════════════════════════════
 YOUR MISSION
 ═══════════════════════════════════════════════════════════════
@@ -67,6 +68,10 @@ DO NOT run experiments - just prepare the environment for them.
    - If `environment.yaml` has `name: paper_reproduction`, **CHANGE IT** in the file before creating!
 
 3. **NEVER MODIFY HOST**: Do not run `pip install` in the global scope. Always use `-n [new_env_name]`.
+
+4. **NO SUDO** - Use conda/micromamba/pyenv for Python versions (no sudo needed):
+   - ❌ `sudo apt-get install python3.7` → ✅ `micromamba create -n env python=3.7 -y`
+   - ❌ `sudo pip install` → ✅ `micromamba run -n env pip install`
 
 ═══════════════════════════════════════════════════════════════
 ⚠️  CRITICAL: YOU ARE AN AUTOMATED BOT, NOT A HUMAN
@@ -98,29 +103,26 @@ CORE INSTRUCTION: "THINK BEFORE YOU ACT"
   THOUGHT: "I need to check if [tool] is installed because the README mentions it. I will use `which micromamba`."
   Tool Call: execute_shell_command("which tool")
 
-CORE INSTRUCTION: "MAINTAIN A CHECKLIST"
-- You MUST create and maintain a `reproduction_checklist.md` file INSIDE the repo directory to track your progress.
-- At the start of EVERY loop, you must READ this file.
-- After completing a task, you must UPDATE this file.
+CORE INSTRUCTION: "UPDATE THE EXISTING CHECKLIST"
+- A `reproduction_checklist.md` file ALREADY EXISTS in the repo (created by the Planning Agent).
+- At the start, READ this file to understand the plan and see the environment setup tasks.
+- After completing each task, UPDATE the checklist to mark items as done: `- [x]`
+- Fill in the **Tool Detected:** and **Environment Name:** fields when you determine them.
+- DO NOT create a new checklist - just update the existing one!
 
-PHASE 0: INITIALIZE PLAN & CHECKLIST
-└─ Create a `reproduction_checklist.md` in the repo (e.g., `./cloned_repo/reproduction_checklist.md`) with this structure:
-   ```markdown
-   # Reproduction Checklist
-   **Tool Used:** [PENDING] (Update this once detected!)
-   **Environment Name:** [PENDING] (Update this once created!)
+CORE INSTRUCTION: "SWITCH TOOL IF PYTHON VERSION MISMATCH"
+If you discover a package needs a different Python version (e.g., tensorflow 1.15 needs Python 3.7):
+1. pip/venv CANNOT install Python versions - switch to micromamba/conda/pyenv
+2. UPDATE checklist: `**Tool Detected:** micromamba` and `**Python Version:** 3.7`
+3. Create env: `micromamba create -n env python=3.7 -y && micromamba run -n env pip install -r requirements.txt`
 
-   ## Environment Setup
-   - [ ] Read README and detect recommended tool (micromamba/conda/etc)
-   - [ ] Check if recommended tool is installed
-   - [ ] Install tool if missing
-   - [ ] Analyze environment.yaml/requirements.txt (Check for unpinned numpy, etc)
-   - [ ] Pin versions if necessary (e.g. numpy<2)
-   - [ ] Create environment (USE CORRECT FLAGS!)
-   - [ ] Verify installation (List packages)
-   - [ ] Test imports (torch, transformers)
-   ```
-└─ Reason about the next step based on this checklist.
+PHASE 0: READ AND UNDERSTAND THE CHECKLIST
+└─ Read `reproduction_checklist.md` from the repo root
+└─ Find the "## Environment Setup" section
+└─ Note what tasks are listed (they should already include all the steps)
+└─ Your job: Execute these tasks and mark them as completed
+└─ After detecting the tool: UPDATE **Tool Detected:** in the checklist
+└─ After creating environment: UPDATE **Environment Name:** in the checklist
 
 PHASE 1: ANALYZE ENVIRONMENT FILES AND DETECT RECOMMENDED TOOLS
 └─ Read `reproduction_checklist.md` to see what to do.
@@ -145,30 +147,33 @@ PHASE 1: ANALYZE ENVIRONMENT FILES AND DETECT RECOMMENDED TOOLS
       - Make executable: `chmod +x [found_binary]`.
       - Move to path: `mv [found_binary] ~/.local/bin/` OR add to PATH.
 
-      - Update `checklist.md`: Mark "Install tool" as done.
+      - Update `reproduction_checklist.md`: Mark "Install tool" as done.
 
 PHASE 2: ANALYZE ENVIRONMENT FILES - DECIDE IF CHANGE NEEDED
-└─ Read `checklist.md`.
+└─ Read `reproduction_checklist.md`.
 └─ Read environment.yaml or requirements.txt carefully.
 └─ Analyze the version specifications:
    - Are critical packages pinned? (pytorch, transformers, etc.)
    - Are there wildcards that might cause issues? (>=, *, no version)
    - Do the specified versions look reasonable?
 
+└─ **GOLDEN RULE: If packages have exact versions (==), DO NOT MODIFY THEM!**
+   - `tensorflow==1.15.4` → USE AS-IS, do not change
+   - `numpy==1.15.4` → USE AS-IS, do not change
+   - Only modify if versions are missing or use broad ranges
+
 └─ CRITICAL: Make an intelligent decision:
-   ✅ If versions are well-specified (e.g., pytorch=2.0.*, transformers=4.30.0):
-      → SKIP PHASE 3-4, go directly to PHASE 5 (create environment)
-      → The file is fine as-is!
+   ✅ If versions are pinned with `==` (e.g., tensorflow==1.15.4, numpy==1.15.4):
+      → **DO NOT MODIFY** - go directly to PHASE 5 (create environment)
+      → Try installing first. Only change if installation actually FAILS.
 
-   ⚠️  If critical packages are unpinned or have problematic specs:
-      → Proceed to PHASE 3 to determine versions
-      → Examples of problems:
-         * "transformers" with no version (will install latest, likely incompatible)
-         * "pytorch>=1.0" (too broad, could install anything)
-         * "numpy" unpinned (CRITICAL: will install 2.x which breaks torch/pyg/etc)
-         * Conflicting specs (torch 1.x with transformers requiring 2.x)
+   ⚠️  Only modify if packages are truly unpinned:
+      → Examples of problems needing fixes:
+         * "transformers" with no version
+         * "pytorch>=1.0" (too broad)
+         * "numpy" unpinned
 
-└─ Think: "Is this environment file good enough, or will it cause conflicts?"
+└─ Think: "Are versions already pinned? If yes, try them first before changing!"
 └─ Paper date: {paper_date} - use this if you need to determine versions
 
 PHASE 3: DETERMINE COMPATIBLE VERSIONS (Only if PHASE 2 found problems!)
@@ -277,13 +282,58 @@ PHASE 6: VERIFY INSTALLATION (Critical - Environment Must Work!)
 └─ If ANY test fails: Fix it NOW before reporting success
 └─ Think: "Will experiments run without ImportError or version conflicts?"
 
-PHASE 7: REPORT RESULTS
+PHASE 7: SMOKE TEST (Critical - Catches Real Issues!)
+└─ After basic verification passes, run the ACTUAL experiment script briefly
+└─ This catches issues that simple import tests miss:
+   - Complex import chains (from model.layers.attention import ...)
+   - CUDA kernel compilation issues
+   - Version interactions only triggered during execution
+
+HOW TO SMOKE TEST:
+1. Read the README to find the MAIN experiment command
+   - Look for "Quick Start", "Training", "Run" sections
+   - Find commands like: `python train.py`, `python main.py --config ...`
+
+2. ADAPT the command for a quick test:
+   - Add a timeout (e.g., `timeout 60 ...`)
+   - If the script has epoch/step arguments, reduce them (--epochs 1, --max_steps 10)
+   - If it has dataset arguments, use a small/debug dataset if available
+   - Use the CORRECT environment tool from `reproduction_checklist.md`!
+
+3. Run and observe - RECOGNIZE SUCCESS:
+   ✅ SUCCESS if ANY of these appear in output:
+      - "Epoch", "epoch", "Step", "step", "Iteration"
+      - "Training", "Loading", "Processing"
+      - Any numbers being printed (loss values, accuracy, etc.)
+      - Script runs for a while without crashing
+
+   ❌ REAL ERRORS (need fixing):
+      - ModuleNotFoundError → Install missing package
+      - ImportError → Install missing package
+      - SyntaxError → Version incompatibility
+
+   ⚠️ IGNORE (not errors):
+      - Warnings in stderr (DeprecationWarning, etc.)
+      - "Error processing .pth" messages
+      - Timeout after script ran (that's expected!)
+
+4. **STOP WHEN SMOKE TEST PASSES** - don't keep modifying!
+   - If script started running → SUCCESS
+   - Report results and finish
+
+IMPORTANT:
+- Read the README to understand what command to run
+- Use minimal settings so it's quick
+- **Once smoke test runs, you're DONE - report success!**
+
+PHASE 8: REPORT RESULTS
 └─ Summarize what was done:
    - Environment manager used (conda/pip/uv)
    - Environment name or path
    - Whether files were modified (YES/NO)
    - If modified: What packages were pinned
    - Python path for running experiments
+   - **SMOKE TEST STATUS**: Passed/Failed (and what was tested)
 └─ Provide command to activate environment
 └─ Flag any warnings or potential issues
 
@@ -347,6 +397,23 @@ PACKAGE MANAGER SPECIFICS
 - Run commands: `[toolname] run python script.py`
 
 ═══════════════════════════════════════════════════════════════
+⚠️ WARNINGS vs ERRORS - KNOW THE DIFFERENCE
+═══════════════════════════════════════════════════════════════
+
+IGNORE these in stderr (they are NOT errors):
+- DeprecationWarning, FutureWarning, UserWarning
+- "Error processing .pth file" (non-fatal)
+- Any warning that doesn't prevent code from running
+
+REAL ERRORS that need fixing:
+- ModuleNotFoundError, ImportError
+- SyntaxError, NameError
+- "No module named X"
+
+**KEY RULE**: If imports work (✅ Imports OK) → environment is READY!
+Do NOT keep modifying files to "fix" warnings. Move on to smoke test.
+
+═══════════════════════════════════════════════════════════════
 COMMON ISSUES
 ═══════════════════════════════════════════════════════════════
 
@@ -362,13 +429,15 @@ COMMON ISSUES
 KEY PRINCIPLES
 ═══════════════════════════════════════════════════════════════
 
-✅ Pin versions BEFORE installing (preventative, not reactive)
-✅ ALWAYS pin numpy<2 if unpinned (numpy 2.0 is a major breaking change)
+✅ If requirements.txt has exact versions (==), use AS-IS - don't modify!
+✅ If imports work, STOP - move to smoke test immediately
+✅ Pin versions only if they're unpinned AND causing issues
 ✅ Use paper date to guide version selection
 ✅ Verify environment after creation (test imports, check CUDA)
 ✅ Use `conda run` or absolute paths (never standalone activate)
 ❌ Don't run experiments - that's the next agent's job
 ❌ Don't guess versions - research compatibility or use paper date
+❌ Don't keep reinstalling after imports already work
 """
 
         # Tools for environment setup
@@ -389,17 +458,17 @@ KEY PRINCIPLES
         # Create ReAct agent
         self.agent = create_react_agent(self.llm, tools=tools)
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("🔧 Environment Setup Agent Initialized")
         print(f"   Max Iterations: {max_iterations}")
-        print("="*60)
+        print("=" * 60)
 
     def setup_environment(
         self,
         repo_path: str,
         readme_content: str,
         paper_date: Optional[str] = None,
-        paper_title: Optional[str] = None
+        paper_title: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Prepare environment for running experiments.
@@ -420,9 +489,9 @@ KEY PRINCIPLES
                 - warnings: List of warnings or issues
                 - error: Error message if failed
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("🚀 Starting Environment Setup")
-        print("="*60)
+        print("=" * 60)
         print(f"📁 Repository: {repo_path}")
         print(f"📅 Paper Date: {paper_date or 'Unknown'}")
         print(f"📄 Paper: {paper_title or 'N/A'}")
@@ -441,32 +510,30 @@ KEY PRINCIPLES
         else:
             task_parts.append("Paper date unknown - use common compatible versions.")
 
-        task_parts.extend([
-            "",
-            "README excerpt (installation instructions):",
-            "---",
-            readme_content[:2000] if len(readme_content) > 2000 else readme_content,
-            "---",
-            "",
-            "Follow the WORKFLOW phases:",
-            "1. Analyze environment files",
-            "2. Check for unpinned packages",
-            "3. Determine compatible versions",
-            "4. Edit files to pin versions",
-            "5. Create environment",
-            "6. Verify installation",
-            "7. Report results",
-            "",
-            "Start by listing the repository directory to find environment files.",
-        ])
+        task_parts.extend(
+            [
+                "",
+                "README excerpt (installation instructions):",
+                "---",
+                readme_content[:2000] if len(readme_content) > 2000 else readme_content,
+                "---",
+                "",
+                "Follow the WORKFLOW phases:",
+                "1. Analyze environment files",
+                "2. Check for unpinned packages",
+                "3. Determine compatible versions",
+                "4. Edit files to pin versions",
+                "5. Create environment",
+                "6. Verify installation",
+                "7. Report results",
+                "",
+                "Start by listing the repository directory to find environment files.",
+            ]
+        )
 
         task_prompt = "\n".join(task_parts)
 
         # Prepare messages
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": task_prompt}
-        ]
 
         # Run agent
         try:
@@ -477,21 +544,23 @@ KEY PRINCIPLES
                     ]
                 },
                 config={
-                    "recursion_limit": self.max_iterations,
-                    "callbacks": [LoggingCallbackHandler(metrics_tracker=self.metrics_tracker)]
-                }
+                    "recursion_limit": self.max_iterations * 3,
+                    "callbacks": [
+                        LoggingCallbackHandler(metrics_tracker=self.metrics_tracker)
+                    ],
+                },
             )
 
             # Parse results from agent conversation
             result_summary = self._parse_agent_results(result)
 
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("✅ Environment Setup Complete")
-            print("="*60)
+            print("=" * 60)
             print(f"Status: {result_summary['status']}")
-            if result_summary.get('env_name'):
+            if result_summary.get("env_name"):
                 print(f"Environment: {result_summary['env_name']}")
-            if result_summary.get('python_path'):
+            if result_summary.get("python_path"):
                 print(f"Python: {result_summary['python_path']}")
             print()
 
@@ -502,7 +571,8 @@ KEY PRINCIPLES
             return {
                 "success": False,
                 "error": str(e),
-                "status": "failed"
+                "status": "failed",
+                "last_message": f"Exception: {str(e)}",  # Error as reasoning
             }
 
     def _parse_agent_results(self, agent_result: Dict) -> Dict[str, Any]:
@@ -517,6 +587,13 @@ KEY PRINCIPLES
         """
         messages = agent_result.get("messages", [])
 
+        # Extract last_message for reasoning output
+        last_message = ""
+        if messages:
+            last_msg = messages[-1]
+            if hasattr(last_msg, "content"):
+                last_message = last_msg.content
+
         # Default result
         result = {
             "success": False,
@@ -526,33 +603,96 @@ KEY PRINCIPLES
             "python_path": None,
             "packages_pinned": [],
             "warnings": [],
-            "error": None
+            "error": None,
+            "last_message": last_message,  # Agent reasoning for verbose output
         }
 
         # Search for key indicators in agent messages
-        full_conversation = "\n".join([
-            str(m.content) if hasattr(m, 'content') else str(m)
-            for m in messages
-        ])
+        full_conversation = "\n".join(
+            [str(m.content) if hasattr(m, "content") else str(m) for m in messages]
+        )
+        full_conversation_lower = full_conversation.lower()
 
-        # Check for success indicators
-        # Prioritize these over error messages
-        success_markers = [
+        # Check for incomplete execution (agent hit iteration limit)
+        incomplete_indicators = [
+            "sorry",
+            "need more steps",
+            "cannot complete",
+            "unable to finish",
+            "i apologize",
+            "unfortunately",
+            "more iterations",
+        ]
+        is_incomplete = any(ind in full_conversation_lower for ind in incomplete_indicators)
+
+        # Check for SMOKE TEST success (Critical - env is only ready if smoke test passed!)
+        smoke_test_markers = [
+            "smoke test passed",
+            "smoke test successful",
+            "script ran successfully",
+            "experiment started successfully",
+            "training started",
+            "started training",
+            "epoch 0",
+            "epoch 1",
+            "step 0",
+            "step 1",
+            "training loop",
+        ]
+        smoke_test_passed = any(marker in full_conversation_lower for marker in smoke_test_markers)
+
+        # Check for basic success indicators (environment created, imports work)
+        basic_success_markers = [
             "environment created successfully",
             "environment setup complete",
             "successfully prepared",
             "imports ok",
-            "verification successful"
+            "verification successful",
+            "✅ imports ok",
         ]
-        
-        if any(marker in full_conversation.lower() for marker in success_markers):
+        has_basic_success = any(marker in full_conversation_lower for marker in basic_success_markers)
+
+        # Check for explicit failure indicators
+        has_explicit_failure = (
+            "modulenotfounderror" in full_conversation_lower
+            or "importerror" in full_conversation_lower
+            or "environment creation failed" in full_conversation_lower
+            or "setup failed" in full_conversation_lower
+            or "no such file" in full_conversation_lower
+            or "filenotfounderror" in full_conversation_lower
+        )
+
+        # Determine success status based on all conditions
+        # Determine success status based on all conditions
+        if smoke_test_passed:
+            # Full success: smoke test passed implies environment is working
             result["success"] = True
             result["status"] = "success"
-        elif "failed" in full_conversation.lower() or "error" in full_conversation.lower():
+        elif is_incomplete:
+            result["success"] = False
+            result["status"] = "incomplete"
+            result["error"] = "Agent hit iteration limit without completing environment setup"
+        elif has_explicit_failure:
             result["status"] = "failed"
             # Try to extract error message
             for msg in reversed(messages):
-                content = str(msg.content) if hasattr(msg, 'content') else str(msg)
+                content = str(msg.content) if hasattr(msg, "content") else str(msg)
+                if "error" in content.lower():
+                    result["error"] = content[:500]
+                    break
+        elif has_basic_success:
+            # Partial success: basic setup done but no smoke test confirmation
+            result["success"] = False
+            result["status"] = "partial"
+            result["error"] = "Basic environment setup done but smoke test not completed. Environment may not work for actual experiments."
+        elif (
+            "failed" in full_conversation_lower
+            or "error" in full_conversation_lower
+        ):
+            result["status"] = "failed"
+            # Try to extract error message
+            for msg in reversed(messages):
+                content = str(msg.content) if hasattr(msg, "content") else str(msg)
                 if "error" in content.lower():
                     result["error"] = content[:500]
                     break
@@ -561,19 +701,19 @@ KEY PRINCIPLES
         import re
 
         # Look for conda environment name
-        conda_match = re.search(r'conda.*?-n\s+(\w+)', full_conversation)
+        conda_match = re.search(r"conda.*?-n\s+(\w+)", full_conversation)
         if conda_match:
             result["env_name"] = conda_match.group(1)
             result["env_type"] = "conda"
 
         # Look for venv path
-        venv_match = re.search(r'(\.?/?\w*/venv)', full_conversation)
+        venv_match = re.search(r"(\.?/?\w*/venv)", full_conversation)
         if venv_match and not result["env_name"]:
             result["env_name"] = venv_match.group(1)
             result["env_type"] = "venv"
 
         # Try to extract python path
-        python_match = re.search(r'(/[\w/]+/python\d?\.\d?)', full_conversation)
+        python_match = re.search(r"(/[\w/]+/python\d?\.\d?)", full_conversation)
         if python_match:
             result["python_path"] = python_match.group(1)
 

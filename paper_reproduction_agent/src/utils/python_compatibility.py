@@ -3,7 +3,6 @@
 Detects Python version compatibility issues early to avoid dependency hell loops.
 """
 
-import os
 import re
 import sys
 from pathlib import Path
@@ -36,7 +35,7 @@ class PythonCompatibilityChecker:
             "required_version": None,
             "confidence": "low",
             "warnings": [],
-            "suggestions": []
+            "suggestions": [],
         }
 
         # Check setup.py for python_requires
@@ -87,12 +86,14 @@ class PythonCompatibilityChecker:
             result["warnings"].append(
                 f"Repository appears to be {repo_age}+ years old - may have compatibility issues"
             )
-            if float(self.current_python.split('.')[1]) >= 10:  # Python 3.10+
+            if float(self.current_python.split(".")[1]) >= 10:  # Python 3.10+
                 result["confidence"] = "medium"
 
         # Generate suggestions if incompatible
         if not result["compatible"]:
-            result["suggestions"] = self._generate_suggestions(result["required_version"])
+            result["suggestions"] = self._generate_suggestions(
+                result["required_version"]
+            )
 
         return result
 
@@ -103,7 +104,7 @@ class PythonCompatibilityChecker:
             return None
 
         try:
-            content = setup_py.read_text(encoding='utf-8', errors='ignore')
+            content = setup_py.read_text(encoding="utf-8", errors="ignore")
 
             # Look for python_requires
             match = re.search(r'python_requires\s*=\s*["\']([^"\']+)["\']', content)
@@ -111,7 +112,9 @@ class PythonCompatibilityChecker:
                 return match.group(1)
 
             # Look for classifiers
-            classifiers = re.findall(r'Programming Language :: Python :: ([\d.]+)', content)
+            classifiers = re.findall(
+                r"Programming Language :: Python :: ([\d.]+)", content
+            )
             if classifiers:
                 return self._parse_version_from_classifiers(classifiers)
         except Exception:
@@ -126,7 +129,7 @@ class PythonCompatibilityChecker:
             return None
 
         try:
-            content = pyproject.read_text(encoding='utf-8', errors='ignore')
+            content = pyproject.read_text(encoding="utf-8", errors="ignore")
 
             # Look for requires-python in [project]
             match = re.search(r'requires-python\s*=\s*["\']([^"\']+)["\']', content)
@@ -134,8 +137,11 @@ class PythonCompatibilityChecker:
                 return match.group(1)
 
             # Look for python in [tool.poetry.dependencies]
-            match = re.search(r'\[tool\.poetry\.dependencies\].*?python\s*=\s*["\']([^"\']+)["\']',
-                            content, re.DOTALL)
+            match = re.search(
+                r'\[tool\.poetry\.dependencies\].*?python\s*=\s*["\']([^"\']+)["\']',
+                content,
+                re.DOTALL,
+            )
             if match:
                 return match.group(1)
         except Exception:
@@ -148,33 +154,35 @@ class PythonCompatibilityChecker:
         warnings = []
 
         # Check requirements.txt
-        req_files = ["requirements.txt", "requirements-dev.txt", "requirements-test.txt"]
+        req_files = [
+            "requirements.txt",
+            "requirements-dev.txt",
+            "requirements-test.txt",
+        ]
         for req_file in req_files:
             req_path = self.repo_path / req_file
             if req_path.exists():
                 try:
-                    content = req_path.read_text(encoding='utf-8', errors='ignore')
+                    content = req_path.read_text(encoding="utf-8", errors="ignore")
 
                     # Check for Python 2 only packages
-                    if re.search(r'(futures|functools32)', content, re.IGNORECASE):
-                        warnings.append(
-                            f"{req_file} contains Python 2-only packages"
-                        )
+                    if re.search(r"(futures|functools32)", content, re.IGNORECASE):
+                        warnings.append(f"{req_file} contains Python 2-only packages")
 
                     # Check for very old TensorFlow versions
-                    tf_match = re.search(r'tensorflow[^=]*==?\s*([0-9.]+)', content)
+                    tf_match = re.search(r"tensorflow[^=]*==?\s*([0-9.]+)", content)
                     if tf_match:
                         tf_version = tf_match.group(1)
-                        if tf_version.startswith('1.') or tf_version.startswith('0.'):
+                        if tf_version.startswith("1.") or tf_version.startswith("0."):
                             warnings.append(
                                 f"Old TensorFlow version {tf_version} - requires Python 3.6-3.7"
                             )
 
                     # Check for very old PyTorch versions
-                    torch_match = re.search(r'torch[^=]*==?\s*([0-9.]+)', content)
+                    torch_match = re.search(r"torch[^=]*==?\s*([0-9.]+)", content)
                     if torch_match:
                         torch_version = torch_match.group(1)
-                        if torch_version.startswith('0.'):
+                        if torch_version.startswith("0."):
                             warnings.append(
                                 f"Old PyTorch version {torch_version} - may have compatibility issues"
                             )
@@ -190,14 +198,14 @@ class PythonCompatibilityChecker:
             readme_path = self.repo_path / readme_file
             if readme_path.exists():
                 try:
-                    content = readme_path.read_text(encoding='utf-8', errors='ignore')
+                    content = readme_path.read_text(encoding="utf-8", errors="ignore")
 
                     # Look for Python version requirements
                     # Match patterns like "Python 3.6+", "Python 2.7-3.7", "requires Python 3.6"
                     patterns = [
-                        r'(?:requires?|needs?|supports?)\s+Python\s+([\d.]+(?:\s*-\s*[\d.]+)?)',
-                        r'Python\s+([\d.]+)\+',
-                        r'Python\s+([\d.]+)\s*-\s*([\d.]+)',
+                        r"(?:requires?|needs?|supports?)\s+Python\s+([\d.]+(?:\s*-\s*[\d.]+)?)",
+                        r"Python\s+([\d.]+)\+",
+                        r"Python\s+([\d.]+)\s*-\s*([\d.]+)",
                     ]
 
                     for pattern in patterns:
@@ -219,6 +227,7 @@ class PythonCompatibilityChecker:
 
             oldest_mtime = min(f.stat().st_mtime for f in python_files if f.exists())
             import time
+
             age_seconds = time.time() - oldest_mtime
             age_years = age_seconds / (365.25 * 24 * 3600)
 
@@ -230,37 +239,45 @@ class PythonCompatibilityChecker:
         """Check if current Python version satisfies requirement."""
         try:
             # Parse requirement string (e.g., ">=3.6", "3.6-3.8", ">=3.6,<3.10")
-            current_major, current_minor = map(int, self.current_python.split('.'))
+            current_major, current_minor = map(int, self.current_python.split("."))
 
             # Handle ranges like "3.6-3.8"
-            if '-' in required and not required.startswith('>='):
-                parts = required.split('-')
+            if "-" in required and not required.startswith(">="):
+                parts = required.split("-")
                 min_ver = parts[0].strip()
                 max_ver = parts[1].strip() if len(parts) > 1 else None
 
                 min_major, min_minor = self._parse_version(min_ver)
                 if max_ver:
                     max_major, max_minor = self._parse_version(max_ver)
-                    return (min_major, min_minor) <= (current_major, current_minor) <= (max_major, max_minor)
+                    return (
+                        (min_major, min_minor)
+                        <= (current_major, current_minor)
+                        <= (max_major, max_minor)
+                    )
                 else:
                     return (current_major, current_minor) >= (min_major, min_minor)
 
             # Handle operators like ">=3.6", ">=3.6,<3.10"
-            if '>=' in required:
-                version_str = required.split('>=')[1].split(',')[0].strip()
+            if ">=" in required:
+                version_str = required.split(">=")[1].split(",")[0].strip()
                 min_major, min_minor = self._parse_version(version_str)
 
                 # Check if there's an upper bound
-                if '<' in required:
-                    upper_bound = required.split('<')[1].strip()
+                if "<" in required:
+                    upper_bound = required.split("<")[1].strip()
                     max_major, max_minor = self._parse_version(upper_bound)
-                    return (min_major, min_minor) <= (current_major, current_minor) < (max_major, max_minor)
+                    return (
+                        (min_major, min_minor)
+                        <= (current_major, current_minor)
+                        < (max_major, max_minor)
+                    )
 
                 return (current_major, current_minor) >= (min_major, min_minor)
 
             # Handle exact version or version with +
-            if '+' in required:
-                version_str = required.replace('+', '').strip()
+            if "+" in required:
+                version_str = required.replace("+", "").strip()
                 min_major, min_minor = self._parse_version(version_str)
                 return (current_major, current_minor) >= (min_major, min_minor)
 
@@ -274,8 +291,8 @@ class PythonCompatibilityChecker:
 
     def _parse_version(self, version_str: str) -> Tuple[int, int]:
         """Parse version string to (major, minor) tuple."""
-        version_str = re.sub(r'[^\d.]', '', version_str)  # Remove non-numeric
-        parts = version_str.split('.')
+        version_str = re.sub(r"[^\d.]", "", version_str)  # Remove non-numeric
+        parts = version_str.split(".")
         major = int(parts[0]) if len(parts) > 0 else 3
         minor = int(parts[1]) if len(parts) > 1 else 0
         return major, minor
@@ -285,7 +302,7 @@ class PythonCompatibilityChecker:
         versions = []
         for c in classifiers:
             try:
-                parts = c.split('.')
+                parts = c.split(".")
                 if len(parts) >= 2:
                     versions.append((int(parts[0]), int(parts[1])))
             except ValueError:
@@ -309,19 +326,21 @@ class PythonCompatibilityChecker:
         if required_version:
             # Parse the required version to suggest specific Python version
             try:
-                if '-' in required_version:
+                if "-" in required_version:
                     # Range like "3.6-3.8"
-                    max_ver = required_version.split('-')[1].strip()
+                    max_ver = required_version.split("-")[1].strip()
                     suggestions.append(
                         f"Create a virtual environment with Python {max_ver}: "
                         f"conda create -n old_env python={max_ver}"
                     )
-                elif '>=' in required_version:
+                elif ">=" in required_version:
                     # Minimum version like ">=3.6"
-                    min_ver = re.sub(r'[^\d.]', '', required_version.split('>=')[1].split(',')[0])
-                    if '<' in required_version:
+                    re.sub(
+                        r"[^\d.]", "", required_version.split(">=")[1].split(",")[0]
+                    )
+                    if "<" in required_version:
                         # Has upper bound
-                        max_ver = re.sub(r'[^\d.]', '', required_version.split('<')[1])
+                        max_ver = re.sub(r"[^\d.]", "", required_version.split("<")[1])
                         major, minor = self._parse_version(max_ver)
                         # Suggest one version below the upper bound
                         suggested = f"{major}.{max(0, minor-1)}"
@@ -335,7 +354,7 @@ class PythonCompatibilityChecker:
                         )
                 else:
                     # Exact version or version with +
-                    version = re.sub(r'[^\d.]', '', required_version)
+                    version = re.sub(r"[^\d.]", "", required_version)
                     suggestions.append(
                         f"Create a virtual environment with Python {version}: "
                         f"conda create -n old_env python={version}"

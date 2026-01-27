@@ -12,7 +12,6 @@ To use local vLLM:
 """
 
 import os
-from typing import Optional
 
 
 def create_llm(temperature: float = 0.3):
@@ -28,7 +27,7 @@ def create_llm(temperature: float = 0.3):
 
     Args:
         temperature: Temperature for LLM generation (defaults to env var or 0.3)
-    
+
     Returns:
         Configured LLM instance
 
@@ -59,7 +58,9 @@ def create_llm(temperature: float = 0.3):
                     base_url=base_url,
                 )
             except ImportError:
-                print("⚠️  langchain-ollama not installed. Install with: pip install langchain-ollama")
+                print(
+                    "⚠️  langchain-ollama not installed. Install with: pip install langchain-ollama"
+                )
                 print("⚠️  Also ensure Ollama is installed: https://ollama.com/download")
                 print("Falling back to API providers...")
 
@@ -94,6 +95,7 @@ def create_llm(temperature: float = 0.3):
 
                 # If no GPU or incompatible GPU, use CPU
                 import torch
+
                 if not torch.cuda.is_available():
                     print("   No compatible GPU detected, using CPU (will be slower)")
                     vllm_kwargs["device"] = "cpu"
@@ -125,7 +127,9 @@ def create_llm(temperature: float = 0.3):
                 temperature=temperature,
             )
         except ImportError:
-            print("⚠️  langchain-google-genai not installed. Install with: pip install langchain-google-genai")
+            print(
+                "⚠️  langchain-google-genai not installed. Install with: pip install langchain-google-genai"
+            )
             print("Falling back to other providers...")
         except Exception as e:
             print(f"⚠️  Failed to initialize Gemini: {e}")
@@ -162,8 +166,10 @@ def create_llm(temperature: float = 0.3):
         if base_url:
             print(f"🖥️  Using Local vLLM Server with {model}")
             print(f"   Base URL: {base_url}")
-            print(f"   Works like OpenAI API - no wrapper needed!")
-            print(f"   Make sure vLLM is started with: --enable-auto-tool-choice --tool-call-parser hermes")
+            print("   Works like OpenAI API - no wrapper needed!")
+            print(
+                "   Make sure vLLM is started with: --enable-auto-tool-choice --tool-call-parser hermes"
+            )
         else:
             print(f"🤖 Using OpenAI with {model}")
 
@@ -185,7 +191,9 @@ def create_llm(temperature: float = 0.3):
                 temperature=temperature,
             )
         except ImportError:
-            print("⚠️  langchain-groq not installed. Install with: pip install langchain-groq")
+            print(
+                "⚠️  langchain-groq not installed. Install with: pip install langchain-groq"
+            )
             print("Falling back to other providers...")
 
     # Check for Anthropic
@@ -267,6 +275,7 @@ def create_specific_llm(provider: str, temperature: float = 0.1):
             raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set")
 
         from langchain_google_genai import ChatGoogleGenerativeAI
+
         model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
 
         return ChatGoogleGenerativeAI(
@@ -281,6 +290,7 @@ def create_specific_llm(provider: str, temperature: float = 0.1):
             raise ValueError("GROQ_API_KEY not set")
 
         from langchain_groq import ChatGroq
+
         model = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 
         return ChatGroq(
@@ -295,6 +305,7 @@ def create_specific_llm(provider: str, temperature: float = 0.1):
             raise ValueError("OPENAI_API_KEY not set")
 
         from langchain_openai import ChatOpenAI
+
         model = os.getenv("LLM_MODEL", "gpt-4-turbo-preview")
 
         return ChatOpenAI(
@@ -309,6 +320,7 @@ def create_specific_llm(provider: str, temperature: float = 0.1):
             raise ValueError("ANTHROPIC_API_KEY not set")
 
         from langchain_anthropic import ChatAnthropic
+
         model = os.getenv("LLM_MODEL", "claude-3-sonnet-20240229")
 
         return ChatAnthropic(
@@ -318,4 +330,6 @@ def create_specific_llm(provider: str, temperature: float = 0.1):
         )
 
     else:
-        raise ValueError(f"Unknown provider: {provider}. Use 'gemini', 'groq', 'openai', or 'anthropic'")
+        raise ValueError(
+            f"Unknown provider: {provider}. Use 'gemini', 'groq', 'openai', or 'anthropic'"
+        )

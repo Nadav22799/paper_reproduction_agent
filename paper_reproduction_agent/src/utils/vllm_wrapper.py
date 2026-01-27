@@ -18,7 +18,9 @@ class VLLMMultiTurnWrapper:
     compatibility with LangGraph's ReAct agent and tool binding.
     """
 
-    def __init__(self, base_llm: BaseChatModel, debug: bool = False, enable_recovery: bool = True):
+    def __init__(
+        self, base_llm: BaseChatModel, debug: bool = False, enable_recovery: bool = True
+    ):
         """
         Initialize wrapper.
 
@@ -31,7 +33,9 @@ class VLLMMultiTurnWrapper:
         self.debug = debug
         self.enable_recovery = enable_recovery
 
-    def invoke(self, messages: List[BaseMessage], config: Optional[dict] = None, **kwargs) -> AIMessage:
+    def invoke(
+        self, messages: List[BaseMessage], config: Optional[dict] = None, **kwargs
+    ) -> AIMessage:
         """
         Invoke the LLM with messages.
 
@@ -51,10 +55,12 @@ class VLLMMultiTurnWrapper:
 
         # Check what we got back
         has_content = bool(result.content and len(str(result.content).strip()) > 0)
-        has_tools = bool(hasattr(result, 'tool_calls') and result.tool_calls)
+        has_tools = bool(hasattr(result, "tool_calls") and result.tool_calls)
 
         if self.debug:
-            print(f"[vLLM DEBUG] Result: content={has_content}, tool_calls={len(result.tool_calls) if has_tools else 0}")
+            print(
+                f"[vLLM DEBUG] Result: content={has_content}, tool_calls={len(result.tool_calls) if has_tools else 0}"
+            )
 
             # Show raw content preview
             if result.content:
@@ -62,38 +68,59 @@ class VLLMMultiTurnWrapper:
                 print(f"[vLLM DEBUG] Content preview: {preview}...")
 
             # Check response metadata
-            if hasattr(result, 'response_metadata'):
+            if hasattr(result, "response_metadata"):
                 metadata = result.response_metadata
-                if 'finish_reason' in metadata:
+                if "finish_reason" in metadata:
                     print(f"[vLLM DEBUG] finish_reason: {metadata['finish_reason']}")
-                if 'token_usage' in metadata:
+                if "token_usage" in metadata:
                     print(f"[vLLM DEBUG] token_usage: {metadata['token_usage']}")
 
         # Try to extract content from GPT-OSS harmony format if empty
         if not has_content and not has_tools:
             # Check if this might be a harmony format response that wasn't parsed
-            token_usage = result.response_metadata.get('token_usage', {}) if hasattr(result, 'response_metadata') else {}
-            completion_tokens = token_usage.get('completion_tokens', 0)
+            token_usage = (
+                result.response_metadata.get("token_usage", {})
+                if hasattr(result, "response_metadata")
+                else {}
+            )
+            completion_tokens = token_usage.get("completion_tokens", 0)
 
             if completion_tokens > 0:
-                print(f"⚠️  WARNING: vLLM generated {completion_tokens} tokens but content is empty!")
-                print(f"    This suggests GPT-OSS harmony format isn't being parsed correctly.")
-                print(f"    Attempting to extract from harmony channels...")
+                print(
+                    f"⚠️  WARNING: vLLM generated {completion_tokens} tokens but content is empty!"
+                )
+                print(
+                    "    This suggests GPT-OSS harmony format isn't being parsed correctly."
+                )
+                print("    Attempting to extract from harmony channels...")
 
                 # The content might be in the raw response - try to access it
                 result = self._try_extract_harmony_content(result)
 
                 # Check if extraction worked
                 if result.content and len(str(result.content).strip()) > 0:
-                    print(f"    ✅ Successfully extracted {len(result.content)} chars from harmony format!")
+                    print(
+                        f"    ✅ Successfully extracted {len(result.content)} chars from harmony format!"
+                    )
                 else:
-                    print(f"    ❌ Failed to extract content - vLLM response format issue")
-                    print(f"    Response metadata: {result.response_metadata if hasattr(result, 'response_metadata') else 'N/A'}")
+                    print(
+                        "    ❌ Failed to extract content - vLLM response format issue"
+                    )
+                    print(
+                        f"    Response metadata: {result.response_metadata if hasattr(result, 'response_metadata') else 'N/A'}"
+                    )
 
         # Check for empty response after tool results (multi-turn issue)
-        if self.enable_recovery and not has_content and not has_tools and self._has_recent_tool_result(messages):
+        if (
+            self.enable_recovery
+            and not has_content
+            and not has_tools
+            and self._has_recent_tool_result(messages)
+        ):
             if self.debug:
-                print(f"[vLLM DEBUG] Empty response detected after tool result - attempting recovery")
+                print(
+                    "[vLLM DEBUG] Empty response detected after tool result - attempting recovery"
+                )
 
             result = self._recover_from_empty(messages, result, config, **kwargs)
 
@@ -116,17 +143,16 @@ class VLLMMultiTurnWrapper:
         """
         # Check if we have access to the raw response
         # LangChain's ChatOpenAI stores the raw OpenAI response in response_metadata
-        if not hasattr(result, 'response_metadata'):
+        if not hasattr(result, "response_metadata"):
             return result
 
         # Try to get the raw message content if available
         # Sometimes the harmony format content is in the original response but not extracted
-        raw_content = None
 
         # Check if there's a raw response field we can access
         # This is a long shot but worth trying
-        if hasattr(self.base_llm, 'last_response'):
-            raw_content = str(self.base_llm.last_response)
+        if hasattr(self.base_llm, "last_response"):
+            str(self.base_llm.last_response)
 
         # If we can't access raw response, we can't extract harmony content
         # The issue is that by the time we get the AIMessage, LangChain has already
@@ -134,13 +160,22 @@ class VLLMMultiTurnWrapper:
 
         # Log what we tried
         if self.debug:
-            print(f"[vLLM DEBUG] Attempted harmony extraction but couldn't access raw response")
-            print(f"[vLLM DEBUG] This means vLLM isn't including content in OpenAI-format response")
+            print(
+                "[vLLM DEBUG] Attempted harmony extraction but couldn't access raw response"
+            )
+            print(
+                "[vLLM DEBUG] This means vLLM isn't including content in OpenAI-format response"
+            )
 
         return result
 
-    def _recover_from_empty(self, messages: List[BaseMessage], empty_result: AIMessage,
-                           config: Optional[dict], **kwargs) -> AIMessage:
+    def _recover_from_empty(
+        self,
+        messages: List[BaseMessage],
+        empty_result: AIMessage,
+        config: Optional[dict],
+        **kwargs,
+    ) -> AIMessage:
         """
         Recover from empty response after tool results.
 
@@ -156,7 +191,7 @@ class VLLMMultiTurnWrapper:
         Returns:
             Recovered AIMessage or original empty response
         """
-        from langchain_core.messages import HumanMessage, ToolMessage
+        from langchain_core.messages import HumanMessage
 
         print("🔧 Recovering from empty vLLM response...")
 
@@ -168,12 +203,15 @@ class VLLMMultiTurnWrapper:
             return empty_result
 
         # Create continuation prompt with tool result summary
-        tool_summary = "\n".join([
-            f"- {msg.name if hasattr(msg, 'name') else 'unknown'}: {str(msg.content)[:200]}"
-            for msg in tool_results
-        ])
+        tool_summary = "\n".join(
+            [
+                f"- {msg.name if hasattr(msg, 'name') else 'unknown'}: {str(msg.content)[:200]}"
+                for msg in tool_results
+            ]
+        )
 
-        continuation = HumanMessage(content=f"""The tool(s) you called returned results:
+        continuation = HumanMessage(
+            content=f"""The tool(s) you called returned results:
 
 {tool_summary}
 
@@ -181,12 +219,13 @@ Analyze these results and respond. You MUST either:
 1. Explain what you learned from these results and call another tool if needed
 2. Provide your conclusion based on the information
 
-Your response should NOT be empty. Continue the task.""")
+Your response should NOT be empty. Continue the task."""
+        )
 
         extended_messages = list(messages) + [continuation]
 
         if self.debug:
-            print(f"[vLLM DEBUG] Trying recovery with continuation prompt...")
+            print("[vLLM DEBUG] Trying recovery with continuation prompt...")
 
         result = self.base_llm.invoke(extended_messages, config=config, **kwargs)
 
@@ -198,10 +237,10 @@ Your response should NOT be empty. Continue the task.""")
         print("  First attempt failed, trying stronger instruction...")
         explicit_continuation = HumanMessage(
             content="IMPORTANT: I need your response to the tool results shown above.\n\n"
-                   "Based on the tool results, write a response that either:\n"
-                   "1. Calls another tool with proper arguments, OR\n"
-                   "2. States your conclusion/decision based on what you learned\n\n"
-                   "Respond NOW - do not return an empty message."
+            "Based on the tool results, write a response that either:\n"
+            "1. Calls another tool with proper arguments, OR\n"
+            "2. States your conclusion/decision based on what you learned\n\n"
+            "Respond NOW - do not return an empty message."
         )
         extended_messages = list(messages) + [explicit_continuation]
 
@@ -218,15 +257,18 @@ Your response should NOT be empty. Continue the task.""")
     def _is_empty_response(self, message: AIMessage) -> bool:
         """Check if response is empty (no content and no tool calls)."""
         has_content = bool(message.content and len(str(message.content).strip()) > 0)
-        has_tool_calls = bool(hasattr(message, 'tool_calls') and message.tool_calls)
+        has_tool_calls = bool(hasattr(message, "tool_calls") and message.tool_calls)
         return not has_content and not has_tool_calls
 
     def _has_recent_tool_result(self, messages: List[BaseMessage]) -> bool:
         """Check if the last message is a tool result."""
         from langchain_core.messages import ToolMessage
+
         return len(messages) > 0 and isinstance(messages[-1], ToolMessage)
 
-    def _get_recent_tool_results(self, messages: List[BaseMessage], limit: int = 5) -> List:
+    def _get_recent_tool_results(
+        self, messages: List[BaseMessage], limit: int = 5
+    ) -> List:
         """Get recent tool results from message history."""
         from langchain_core.messages import ToolMessage, AIMessage
 
@@ -241,19 +283,25 @@ Your response should NOT be empty. Continue the task.""")
                 break
         return tool_results
 
-    def stream(self, messages: List[BaseMessage], config: Optional[dict] = None, **kwargs):
+    def stream(
+        self, messages: List[BaseMessage], config: Optional[dict] = None, **kwargs
+    ):
         """Stream responses (delegates to base LLM)."""
         return self.base_llm.stream(messages, config=config, **kwargs)
 
     def bind_tools(self, tools: List[Any], **kwargs):
         """Bind tools and return wrapped version."""
         bound_llm = self.base_llm.bind_tools(tools, **kwargs)
-        return VLLMMultiTurnWrapper(bound_llm, debug=self.debug, enable_recovery=self.enable_recovery)
+        return VLLMMultiTurnWrapper(
+            bound_llm, debug=self.debug, enable_recovery=self.enable_recovery
+        )
 
     def with_structured_output(self, schema, **kwargs):
         """Support structured output."""
         structured_llm = self.base_llm.with_structured_output(schema, **kwargs)
-        return VLLMMultiTurnWrapper(structured_llm, debug=self.debug, enable_recovery=self.enable_recovery)
+        return VLLMMultiTurnWrapper(
+            structured_llm, debug=self.debug, enable_recovery=self.enable_recovery
+        )
 
     def __getattr__(self, name):
         """Delegate unknown attributes to base_llm."""

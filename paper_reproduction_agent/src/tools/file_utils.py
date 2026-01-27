@@ -11,7 +11,13 @@ from langchain_core.tools import tool
 
 
 @tool
-def grep_in_directory(pattern: str, directory: str = ".", file_pattern: str = "*", recursive: bool = True, max_results: int = 50) -> Dict[str, Any]:
+def grep_in_directory(
+    pattern: str,
+    directory: str = ".",
+    file_pattern: str = "*",
+    recursive: bool = True,
+    max_results: int = 50,
+) -> Dict[str, Any]:
     """
     Search for pattern across multiple files in a directory (like grep -r).
 
@@ -45,16 +51,15 @@ def grep_in_directory(pattern: str, directory: str = ".", file_pattern: str = "*
                 continue
 
             try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
 
                 file_matches = []
                 for i, line in enumerate(lines):
                     if re.search(pattern, line, re.IGNORECASE):
-                        file_matches.append({
-                            "line_number": i + 1,
-                            "line": line.rstrip()
-                        })
+                        file_matches.append(
+                            {"line_number": i + 1, "line": line.rstrip()}
+                        )
                         total_matches += 1
 
                         if total_matches >= max_results:
@@ -77,7 +82,7 @@ def grep_in_directory(pattern: str, directory: str = ".", file_pattern: str = "*
             "total_matches": total_matches,
             "matches": all_matches,
             "truncated": total_matches >= max_results,
-            "summary": f"Found {total_matches} match(es) across {len(all_matches)} file(s)"
+            "summary": f"Found {total_matches} match(es) across {len(all_matches)} file(s)",
         }
 
     except Exception as e:
@@ -85,7 +90,13 @@ def grep_in_directory(pattern: str, directory: str = ".", file_pattern: str = "*
 
 
 @tool
-def find_files(directory: str = ".", pattern: str = "*", file_type: Optional[str] = None, max_depth: Optional[int] = None, max_results: int = 100) -> Dict[str, Any]:
+def find_files(
+    directory: str = ".",
+    pattern: str = "*",
+    file_type: Optional[str] = None,
+    max_depth: Optional[int] = None,
+    max_results: int = 100,
+) -> Dict[str, Any]:
     """
     Find files matching a pattern (like find command).
 
@@ -113,7 +124,9 @@ def find_files(directory: str = ".", pattern: str = "*", file_type: Optional[str
             # Implement depth limit
             paths = []
             for depth in range(max_depth + 1):
-                search_pattern = "/".join(["*"] * depth) + "/" + pattern if depth > 0 else pattern
+                search_pattern = (
+                    "/".join(["*"] * depth) + "/" + pattern if depth > 0 else pattern
+                )
                 paths.extend(directory.glob(search_pattern))
 
         # Filter by type
@@ -127,12 +140,14 @@ def find_files(directory: str = ".", pattern: str = "*", file_type: Optional[str
 
         results = []
         for path in paths:
-            results.append({
-                "path": str(path.relative_to(directory)),
-                "absolute_path": str(path),
-                "type": "file" if path.is_file() else "dir",
-                "size": path.stat().st_size if path.is_file() else None
-            })
+            results.append(
+                {
+                    "path": str(path.relative_to(directory)),
+                    "absolute_path": str(path),
+                    "type": "file" if path.is_file() else "dir",
+                    "size": path.stat().st_size if path.is_file() else None,
+                }
+            )
 
         return {
             "success": True,
@@ -141,10 +156,8 @@ def find_files(directory: str = ".", pattern: str = "*", file_type: Optional[str
             "found": results,
             "count": len(results),
             "truncated": len(paths) >= max_results,
-            "summary": f"Found {len(results)} item(s) matching '{pattern}'"
+            "summary": f"Found {len(results)} item(s) matching '{pattern}'",
         }
 
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-

@@ -2,9 +2,8 @@
 
 import os
 import subprocess
-import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 from langchain.tools import tool
 from pydantic import BaseModel, Field
@@ -27,7 +26,7 @@ def search_file(path: str, query: str, max_results: int = 10) -> str:
 
         if os.path.isfile(path):
             # Search in single file
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
                 for i, line in enumerate(lines, 1):
                     if query.lower() in line.lower():
@@ -38,14 +37,20 @@ def search_file(path: str, query: str, max_results: int = 10) -> str:
             # Search in directory
             for root, dirs, files in os.walk(path):
                 for file in files:
-                    if file.endswith(('.py', '.md', '.txt', '.sh', '.yml', '.yaml', '.json')):
+                    if file.endswith(
+                        (".py", ".md", ".txt", ".sh", ".yml", ".yaml", ".json")
+                    ):
                         file_path = os.path.join(root, file)
                         try:
-                            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            with open(
+                                file_path, "r", encoding="utf-8", errors="ignore"
+                            ) as f:
                                 lines = f.readlines()
                                 for i, line in enumerate(lines, 1):
                                     if query.lower() in line.lower():
-                                        results.append(f"{file_path}:{i}: {line.strip()}")
+                                        results.append(
+                                            f"{file_path}:{i}: {line.strip()}"
+                                        )
                                         if len(results) >= max_results:
                                             return "\n".join(results)
                         except:
@@ -72,20 +77,46 @@ def read_file(file_path: str, max_lines: int = 500) -> str:
         File contents or error message
     """
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
             if len(lines) > max_lines:
-                content = ''.join(lines[:max_lines])
+                content = "".join(lines[:max_lines])
                 content += f"\n\n... (truncated, showing first {max_lines} of {len(lines)} lines)"
             else:
-                content = ''.join(lines)
+                content = "".join(lines)
         return content
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
 
 @tool
-def list_directory(dir_path: str = ".", recursive: bool = False, max_depth: int = 3) -> str:
+def write_file(file_path: str, content: str) -> str:
+    """
+    Write content to a file. Overwrites existing content.
+
+    Args:
+        file_path: Path to file to write
+        content: Text content to write
+
+    Returns:
+        Status message
+    """
+    try:
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        return f"File written successfully to {file_path}"
+    except Exception as e:
+        return f"Error writing file: {str(e)}"
+
+
+@tool
+def list_directory(
+    dir_path: str = ".", recursive: bool = False, max_depth: int = 3
+) -> str:
     """
     List contents of a directory.
 
@@ -146,27 +177,33 @@ def _cleanup_distributed_training():
         # Kill only current user's distributed training processes
         subprocess.run(
             f"pkill -u {current_user} -f 'torch.distributed' 2>/dev/null || true",
-            shell=True, capture_output=True, timeout=10
+            shell=True,
+            capture_output=True,
+            timeout=10,
         )
 
         # Free common distributed training ports (only for current user)
         for port in [29500, 29501, 29502]:
             subprocess.run(
                 f"lsof -ti :{port} -u {current_user} 2>/dev/null | xargs -r kill -9 || true",
-                shell=True, capture_output=True, timeout=10
+                shell=True,
+                capture_output=True,
+                timeout=10,
             )
 
         # Set random port for this run
         import random
-        os.environ['MASTER_PORT'] = str(29500 + random.randint(0, 999))
+
+        os.environ["MASTER_PORT"] = str(29500 + random.randint(0, 999))
 
     except Exception:
         pass  # Cleanup is best-effort, don't fail if it doesn't work
 
 
 @tool
-def execute_shell_command(command: str, cwd: str = ".", timeout: int = 3600,
-                         enable_oom_handling: bool = True) -> Dict[str, Any]:
+def execute_shell_command(
+    command: str, cwd: str = ".", timeout: int = 3600, enable_oom_handling: bool = True
+) -> Dict[str, Any]:
     """
     Execute a shell command and capture output with automatic OOM handling.
 
@@ -186,8 +223,10 @@ def execute_shell_command(command: str, cwd: str = ".", timeout: int = 3600,
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=cwd
+            cwd=cwd,
         )
+
+        print(f"Running: {command}")
 
         # Combine output for OOM detection
         full_output = result.stdout + result.stderr
@@ -205,6 +244,7 @@ def execute_shell_command(command: str, cwd: str = ".", timeout: int = 3600,
                 # Import OOM handler
                 import sys
                 from pathlib import Path
+
                 sys.path.insert(0, str(Path(__file__).parent.parent))
                 from utils.oom_handler import OOMHandler
 
@@ -213,7 +253,9 @@ def execute_shell_command(command: str, cwd: str = ".", timeout: int = 3600,
 
                 if oom_detected:
                     # Extract script path from command
-                    script_match = re.search(r'(?:bash|sh|python)\s+([^\s]+\.(?:sh|py))', command)
+                    script_match = re.search(
+                        r"(?:bash|sh|python)\s+([^\s]+\.(?:sh|py))", command
+                    )
                     if script_match:
                         script_path = os.path.join(cwd, script_match.group(1))
 
@@ -222,30 +264,30 @@ def execute_shell_command(command: str, cwd: str = ".", timeout: int = 3600,
                             script_path=script_path,
                             error_output=full_output,
                             attempt=1,
-                            max_attempts=3
+                            max_attempts=3,
                         )
 
                         oom_info = {
-                            'detected': True,
-                            'should_retry': oom_result['should_retry'],
-                            'adjusted': oom_result['adjusted'],
-                            'message': oom_result['message'],
-                            'script_path': script_path
+                            "detected": True,
+                            "should_retry": oom_result["should_retry"],
+                            "adjusted": oom_result["adjusted"],
+                            "message": oom_result["message"],
+                            "script_path": script_path,
                         }
 
-                        if oom_result['adjusted']:
+                        if oom_result["adjusted"]:
                             print(f"\n🔧 OOM Handling: {oom_result['message']}")
-                            print(f"   Script adjusted. Retry with the same command.")
+                            print("   Script adjusted. Retry with the same command.")
                     else:
                         oom_info = {
-                            'detected': True,
-                            'should_retry': False,
-                            'adjusted': False,
-                            'message': 'OOM detected but could not identify script to adjust'
+                            "detected": True,
+                            "should_retry": False,
+                            "adjusted": False,
+                            "message": "OOM detected but could not identify script to adjust",
                         }
             except Exception as e:
                 print(f"⚠️  OOM handler error: {e}")
-                oom_info = {'detected': oom_detected, 'handler_error': str(e)}
+                oom_info = {"detected": oom_detected, "handler_error": str(e)}
 
         if result.returncode != 0:
             # Show last 3000 chars of output for failed commands
@@ -304,7 +346,7 @@ def create_python_file(file_path: str, content: str) -> str:
         path = Path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
         return f"File created successfully at {file_path}"
@@ -315,13 +357,18 @@ def create_python_file(file_path: str, content: str) -> str:
 
 class ExecutePythonCodeInput(BaseModel):
     """Input schema for execute_python_code tool."""
+
     code: str = Field(description="Python code to execute")
-    working_directory: str = Field(default=".", description="Directory to run the code from")
+    working_directory: str = Field(
+        default=".", description="Directory to run the code from"
+    )
     timeout: int = Field(default=300, description="Execution timeout in seconds")
 
 
 @tool(args_schema=ExecutePythonCodeInput)
-def execute_python_code(code: str, working_directory: str = ".", timeout: int = 300) -> Dict[str, Any]:
+def execute_python_code(
+    code: str, working_directory: str = ".", timeout: int = 300
+) -> Dict[str, Any]:
     """
     Execute Python code written by the LLM directly.
 
@@ -380,7 +427,6 @@ def execute_python_code(code: str, working_directory: str = ".", timeout: int = 
             - success: Boolean indicating success
             - script_path: Path to the temporary script file (for debugging)
     """
-    import tempfile
     import uuid
 
     try:
@@ -389,7 +435,7 @@ def execute_python_code(code: str, working_directory: str = ".", timeout: int = 
         script_path = os.path.join(working_directory, script_name)
 
         # Write the code to the script file
-        with open(script_path, 'w', encoding='utf-8') as f:
+        with open(script_path, "w", encoding="utf-8") as f:
             f.write(code)
 
         try:
@@ -399,7 +445,7 @@ def execute_python_code(code: str, working_directory: str = ".", timeout: int = 
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=working_directory
+                cwd=working_directory,
             )
 
             # Clean up - remove the temporary script
@@ -422,7 +468,7 @@ def execute_python_code(code: str, working_directory: str = ".", timeout: int = 
                 "stderr": stderr,
                 "returncode": result.returncode,
                 "success": result.returncode == 0,
-                "script_path": script_path
+                "script_path": script_path,
             }
 
         except subprocess.TimeoutExpired:
@@ -436,7 +482,7 @@ def execute_python_code(code: str, working_directory: str = ".", timeout: int = 
                 "stderr": f"Code execution timed out after {timeout} seconds",
                 "returncode": -1,
                 "success": False,
-                "script_path": script_path
+                "script_path": script_path,
             }
 
     except Exception as e:
@@ -445,19 +491,25 @@ def execute_python_code(code: str, working_directory: str = ".", timeout: int = 
             "stderr": f"Execution error: {str(e)}",
             "returncode": -1,
             "success": False,
-            "script_path": ""
+            "script_path": "",
         }
 
 
 class ExecutePythonScriptInput(BaseModel):
     """Input schema for execute_python_script tool."""
+
     script_path: str = Field(description="Path to Python script")
-    args: Optional[str] = Field(default=None, description="Command line arguments as space-separated string (e.g. '--batch-size 32 --epochs 10')")
+    args: Optional[str] = Field(
+        default=None,
+        description="Command line arguments as space-separated string (e.g. '--batch-size 32 --epochs 10')",
+    )
     timeout: int = Field(default=300, description="Execution timeout in seconds")
 
 
 @tool(args_schema=ExecutePythonScriptInput)
-def execute_python_script(script_path: str, args: Optional[str] = None, timeout: int = 300) -> Dict[str, Any]:
+def execute_python_script(
+    script_path: str, args: Optional[str] = None, timeout: int = 300
+) -> Dict[str, Any]:
     """
     Execute a Python script and capture output.
     Automatically uses the virtual environment (venv or conda) if it exists in the repo.
@@ -484,13 +536,15 @@ def execute_python_script(script_path: str, args: Optional[str] = None, timeout:
             if conda_python and Path(conda_python).exists():
                 env_python = conda_python
                 env_type = "conda"
-                print(f"🐍 Using conda environment Python: {env_python} (env: {conda_env_name})")
+                print(
+                    f"🐍 Using conda environment Python: {env_python} (env: {conda_env_name})"
+                )
                 break
 
             # Then check for venv
             potential_venv = check_dir / "venv"
             if potential_venv.exists():
-                if os.name == 'nt':  # Windows
+                if os.name == "nt":  # Windows
                     venv_python_path = potential_venv / "Scripts" / "python.exe"
                 else:  # Linux/Mac
                     venv_python_path = potential_venv / "bin" / "python"
@@ -512,7 +566,7 @@ def execute_python_script(script_path: str, args: Optional[str] = None, timeout:
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=os.path.dirname(script_path) or "."
+            cwd=os.path.dirname(script_path) or ".",
         )
 
         return {
@@ -562,14 +616,19 @@ def search_error_solution(error_message: str) -> Dict[str, Any]:
             from google.genai import types
         except ImportError:
             return {
-                "solutions": ["Google GenAI SDK not found. Please install `google-genai` to use this feature."],
-                "raw_response": "ImportError: google.genai module not found"
+                "solutions": [
+                    "Google GenAI SDK not found. Please install `google-genai` to use this feature."
+                ],
+                "raw_response": "ImportError: google.genai module not found",
             }
 
         # Configure Gemini
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            return {"solutions": ["GEMINI_API_KEY not found in environment"], "raw_response": ""}
+            return {
+                "solutions": ["GEMINI_API_KEY not found in environment"],
+                "raw_response": "",
+            }
 
         client = genai.Client(api_key=api_key)
 
@@ -584,11 +643,11 @@ Provide:
 
         # Enable search grounding
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model="gemini-1.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
+            ),
         )
 
         if response.text:
@@ -602,7 +661,9 @@ Provide:
 
 
 @tool
-def start_background_process(command: str, log_file: str, cwd: str = ".") -> Dict[str, Any]:
+def start_background_process(
+    command: str, log_file: str, cwd: str = "."
+) -> Dict[str, Any]:
     """
     Start a background process. PREFERRED for all training/evaluation experiments.
     ALWAYS use this instead of execute_shell_command for experiments.
@@ -616,44 +677,46 @@ def start_background_process(command: str, log_file: str, cwd: str = ".") -> Dic
         Dictionary with 'pid', 'log_file', and 'start_message'
     """
     try:
-        import shlex
-        
+
         # Open log file
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        f_log = open(log_path, 'w', encoding='utf-8')
+        f_log = open(log_path, "w", encoding="utf-8")
 
         # Start detached process
         # On Windows, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP/DETACHED_PROCESS might be needed
         # But for simple agent use, just Popen is usually enough if we don't kill it.
         # We use shell=True to support complex commands (pipes, etc)
+        # We use shell=True to support complex commands (pipes, etc)
+        full_log_path = str(log_path.absolute())
+        print(f"Running background process: {command}")
+        print(f"Logging to: {full_log_path}")
         process = subprocess.Popen(
             command,
             shell=True,
             cwd=cwd,
             stdout=f_log,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
         )
 
         return {
             "success": True,
             "pid": process.pid,
             "log_file": str(log_path.absolute()),
-            "message": f"Process started with PID {process.pid}. Logs: {log_file}"
+            "message": f"Process started with PID {process.pid}. Logs: {log_file}",
         }
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 @tool
-def wait_for_process(pid: int, log_file: str, timeout: int = 604800, check_interval: int = 60) -> Dict[str, Any]:
+def wait_for_process(
+    pid: int, log_file: str, timeout: int = 604800, check_interval: int = 60
+) -> Dict[str, Any]:
     """
     Blocks and waits for a process to finish. Checks logs locally every minute.
-    
+
     CRITICAL BEHAVIOR:
     - If process finishes (success or error) -> Returns IMMEDIATELY.
     - If process runs for 7 days -> Returns timeout.
@@ -670,7 +733,7 @@ def wait_for_process(pid: int, log_file: str, timeout: int = 604800, check_inter
     """
     import time
     import psutil
-    
+
     start_time = time.time()
     log_path = Path(log_file)
     last_pos = 0
@@ -685,7 +748,7 @@ def wait_for_process(pid: int, log_file: str, timeout: int = 604800, check_inter
                     "success": False,
                     "status": "timeout",
                     "message": f"Process {pid} timed out after {timeout}s",
-                    "wall_time_seconds": time.time() - start_time
+                    "wall_time_seconds": time.time() - start_time,
                 }
 
             # Check if process is running and NOT a zombie
@@ -693,23 +756,25 @@ def wait_for_process(pid: int, log_file: str, timeout: int = 604800, check_inter
                 proc = psutil.Process(pid)
                 status = proc.status()
                 if status in [psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD]:
-                     print(f"\n⚠️ Process {pid} is a zombie (finished but stuck). Treating as done.")
-                     break
+                    print(
+                        f"\n⚠️ Process {pid} is a zombie (finished but stuck). Treating as done."
+                    )
+                    break
             except psutil.NoSuchProcess:
                 # Process definitely gone
                 break
             except Exception:
                 # Permission denied or other error - assume running if pid_exists was checked
                 pass
-            
+
             # Streaming logs to stdout for user visibility
             try:
                 if log_path.exists():
-                    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
                         f.seek(last_pos)
                         new_data = f.read()
                         if new_data:
-                            print(new_data, end='', flush=True)
+                            print(new_data, end="", flush=True)
                             last_pos = f.tell()
             except Exception:
                 pass
@@ -721,7 +786,7 @@ def wait_for_process(pid: int, log_file: str, timeout: int = 604800, check_inter
         tail_logs = ""
         try:
             if log_path.exists():
-                with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
                     # Read last 2000 chars
                     f.seek(0, 2)
                     size = f.tell()
@@ -735,14 +800,14 @@ def wait_for_process(pid: int, log_file: str, timeout: int = 604800, check_inter
             "status": "finished",
             "message": f"Process {pid} finished.",
             "tail_logs": tail_logs[-2000:] if tail_logs else "No logs found",
-            "wall_time_seconds": wall_time
+            "wall_time_seconds": wall_time,
         }
 
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "wall_time_seconds": time.time() - start_time
+            "wall_time_seconds": time.time() - start_time,
         }
 
 
@@ -751,6 +816,7 @@ def stop_process(pid: int) -> str:
     """Stop a background process."""
     try:
         import psutil
+
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):
             child.kill()
@@ -758,6 +824,7 @@ def stop_process(pid: int) -> str:
         return f"Process {pid} killed"
     except Exception as e:
         return f"Error killing process {pid}: {str(e)}"
+
 
 @tool
 def check_python_compatibility(repo_path: str) -> Dict[str, Any]:
@@ -781,7 +848,9 @@ def check_python_compatibility(repo_path: str) -> Dict[str, Any]:
         # Try multiple paths to find the src directory
         possible_paths = [
             str(Path(__file__).parent.parent),  # From tools/ to src/
-            str(Path(__file__).parent.parent.parent / "src"),  # From paper_reproduction_agent/src/tools to src
+            str(
+                Path(__file__).parent.parent.parent / "src"
+            ),  # From paper_reproduction_agent/src/tools to src
             os.path.join(os.path.dirname(__file__), "..", ".."),  # Relative path
         ]
 
@@ -791,7 +860,9 @@ def check_python_compatibility(repo_path: str) -> Dict[str, Any]:
             if abs_path not in sys.path:
                 sys.path.insert(0, abs_path)
 
-        from utils.python_compatibility import check_python_compatibility as check_compat
+        from utils.python_compatibility import (
+            check_python_compatibility as check_compat,
+        )
 
         result = check_compat(repo_path)
 
@@ -810,7 +881,9 @@ def check_python_compatibility(repo_path: str) -> Dict[str, Any]:
             "compatible": True,  # Assume compatible if check fails
             "current_version": "unknown",
             "required_version": "unknown",
-            "warnings": [f"Compatibility check module not found: {str(e)}. Paths tried: {sys.path[:5]}"],
+            "warnings": [
+                f"Compatibility check module not found: {str(e)}. Paths tried: {sys.path[:5]}"
+            ],
             "suggestions": ["Ensure paper_reproduction_agent/src is in PYTHONPATH"],
             "success": False,
         }
@@ -828,6 +901,7 @@ def check_python_compatibility(repo_path: str) -> Dict[str, Any]:
 # ============================================================================
 # Python Version Management Helpers
 # ============================================================================
+
 
 def _parse_required_python_version(required_version: str) -> Optional[str]:
     """
@@ -855,18 +929,18 @@ def _parse_required_python_version(required_version: str) -> Optional[str]:
         current_major, current_minor = sys.version_info.major, sys.version_info.minor
 
         # Handle range like "3.6-3.8"
-        if '-' in required_version and not required_version.startswith('>='):
-            parts = required_version.split('-')
+        if "-" in required_version and not required_version.startswith(">="):
+            parts = required_version.split("-")
             max_ver = parts[1].strip()
             # Extract version numbers
-            match = re.search(r'(\d+)\.(\d+)', max_ver)
+            match = re.search(r"(\d+)\.(\d+)", max_ver)
             if match:
                 return f"{match.group(1)}.{match.group(2)}"
 
         # Handle ">=3.6,<3.10" - get the upper bound
-        if '<' in required_version:
-            upper_bound = required_version.split('<')[1].strip()
-            match = re.search(r'(\d+)\.(\d+)', upper_bound)
+        if "<" in required_version:
+            upper_bound = required_version.split("<")[1].strip()
+            match = re.search(r"(\d+)\.(\d+)", upper_bound)
             if match:
                 major, minor = int(match.group(1)), int(match.group(2))
                 # Suggest one version below the upper bound
@@ -880,9 +954,9 @@ def _parse_required_python_version(required_version: str) -> Optional[str]:
                 return None
 
         # Handle ">=3.6" - use current if it satisfies, otherwise return minimum
-        if '>=' in required_version:
-            min_ver = required_version.split('>=')[1].split(',')[0].strip()
-            match = re.search(r'(\d+)\.(\d+)', min_ver)
+        if ">=" in required_version:
+            min_ver = required_version.split(">=")[1].split(",")[0].strip()
+            match = re.search(r"(\d+)\.(\d+)", min_ver)
             if match:
                 major, minor = int(match.group(1)), int(match.group(2))
                 # If current Python is older than required, return the minimum
@@ -892,9 +966,9 @@ def _parse_required_python_version(required_version: str) -> Optional[str]:
             return None
 
         # Handle "3.9+" or "3.9"
-        if '+' in required_version or re.match(r'^\d+\.\d+$', required_version):
-            version_str = required_version.replace('+', '').strip()
-            match = re.search(r'(\d+)\.(\d+)', version_str)
+        if "+" in required_version or re.match(r"^\d+\.\d+$", required_version):
+            version_str = required_version.replace("+", "").strip()
+            match = re.search(r"(\d+)\.(\d+)", version_str)
             if match:
                 major, minor = int(match.group(1)), int(match.group(2))
                 # If current is older, return the required version
@@ -912,6 +986,7 @@ def _parse_required_python_version(required_version: str) -> Optional[str]:
 def _check_pyenv_available() -> bool:
     """Check if pyenv is available on the system."""
     import shutil
+
     return shutil.which("pyenv") is not None
 
 
@@ -928,17 +1003,14 @@ def _get_or_install_pyenv_python(python_version: str) -> Optional[str]:
     try:
         # Check if pyenv has this version installed
         result = subprocess.run(
-            ["pyenv", "versions", "--bare"],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["pyenv", "versions", "--bare"], capture_output=True, text=True, timeout=10
         )
 
         if result.returncode != 0:
             print(f"⚠️  Failed to check pyenv versions: {result.stderr}")
             return None
 
-        available_versions = result.stdout.strip().split('\n')
+        available_versions = result.stdout.strip().split("\n")
 
         # Find exact match or closest match
         matching_version = None
@@ -950,24 +1022,27 @@ def _get_or_install_pyenv_python(python_version: str) -> Optional[str]:
         # Install if not found
         if not matching_version:
             print(f"📥 Installing Python {python_version} via pyenv...")
-            print(f"   This may take a few minutes on first install...")
+            print("   This may take a few minutes on first install...")
 
             # Get latest patch version for this minor version
             versions_result = subprocess.run(
                 ["pyenv", "install", "--list"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
             )
 
             # Find latest patch version (e.g., for 3.9, find 3.9.18)
             import re
-            pattern = re.compile(rf'^\s*({python_version}\.\d+)\s*$', re.MULTILINE)
+
+            pattern = re.compile(rf"^\s*({python_version}\.\d+)\s*$", re.MULTILINE)
             matches = pattern.findall(versions_result.stdout)
 
             if matches:
                 # Get the latest patch version
-                latest_version = sorted(matches, key=lambda v: tuple(map(int, v.split('.'))))[-1]
+                latest_version = sorted(
+                    matches, key=lambda v: tuple(map(int, v.split(".")))
+                )[-1]
                 matching_version = latest_version
 
                 print(f"   Installing Python {matching_version}...")
@@ -975,7 +1050,7 @@ def _get_or_install_pyenv_python(python_version: str) -> Optional[str]:
                     ["pyenv", "install", "-s", matching_version],  # -s = skip if exists
                     capture_output=True,
                     text=True,
-                    timeout=600
+                    timeout=600,
                 )
 
                 if install_result.returncode != 0:
@@ -994,7 +1069,7 @@ def _get_or_install_pyenv_python(python_version: str) -> Optional[str]:
             ["pyenv", "prefix", matching_version],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
 
         if pyenv_prefix_result.returncode != 0:
@@ -1010,10 +1085,7 @@ def _get_or_install_pyenv_python(python_version: str) -> Optional[str]:
 
         # Verify the version
         version_check = subprocess.run(
-            [pyenv_python, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
+            [pyenv_python, "--version"], capture_output=True, text=True, timeout=5
         )
         print(f"   Python executable: {pyenv_python}")
         print(f"   Version: {version_check.stdout.strip()}")
@@ -1029,9 +1101,11 @@ def _get_or_install_pyenv_python(python_version: str) -> Optional[str]:
 # Conda Environment Management Helpers
 # ============================================================================
 
+
 def _check_conda_available() -> bool:
     """Check if conda is available on the system."""
     import shutil
+
     return shutil.which("conda") is not None
 
 
@@ -1063,9 +1137,9 @@ def _detect_conda_requirements(repo_path: str) -> Optional[Path]:
             # For requirements.yaml/yml, verify it's conda format (has channels/dependencies)
             if "requirements" in candidate:
                 try:
-                    with open(env_file, 'r') as f:
+                    with open(env_file, "r") as f:
                         content = f.read()
-                        if 'channels:' in content or 'dependencies:' in content:
+                        if "channels:" in content or "dependencies:" in content:
                             return env_file
                 except:
                     pass
@@ -1094,12 +1168,14 @@ def _generate_conda_env_name(repo_path: str) -> str:
     path_hash = hashlib.md5(str(repo).encode()).hexdigest()[:8]
 
     # Sanitize repo name (conda env names can't have special chars)
-    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', repo_name)
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", repo_name)
 
     return f"paper_{safe_name}_{path_hash}"
 
 
-def _create_conda_env(env_name: str, python_version: Optional[str] = None, env_file: Optional[Path] = None) -> bool:
+def _create_conda_env(
+    env_name: str, python_version: Optional[str] = None, env_file: Optional[Path] = None
+) -> bool:
     """
     Create conda environment with specific Python version or from environment file.
 
@@ -1114,10 +1190,7 @@ def _create_conda_env(env_name: str, python_version: Optional[str] = None, env_f
     try:
         # Check if environment already exists
         list_result = subprocess.run(
-            ["conda", "env", "list"],
-            capture_output=True,
-            text=True,
-            timeout=30
+            ["conda", "env", "list"], capture_output=True, text=True, timeout=30
         )
 
         if env_name in list_result.stdout:
@@ -1127,29 +1200,29 @@ def _create_conda_env(env_name: str, python_version: Optional[str] = None, env_f
         if env_file and env_file.exists():
             # Create from environment.yml file
             print(f"📦 Creating conda environment '{env_name}' from {env_file.name}...")
-            print(f"   This may take several minutes...")
+            print("   This may take several minutes...")
 
             result = subprocess.run(
                 ["conda", "env", "create", "-n", env_name, "-f", str(env_file)],
                 capture_output=True,
                 text=True,
-                timeout=1800  # 30 minutes for conda install
+                timeout=1800,  # 30 minutes for conda install
             )
         else:
             # Create from scratch with Python version
             python_spec = f"python={python_version}" if python_version else "python"
             print(f"📦 Creating conda environment '{env_name}' with {python_spec}...")
-            print(f"   This may take several minutes...")
+            print("   This may take several minutes...")
 
             result = subprocess.run(
                 ["conda", "create", "-n", env_name, python_spec, "-y"],
                 capture_output=True,
                 text=True,
-                timeout=1800
+                timeout=1800,
             )
 
         if result.returncode != 0:
-            print(f"❌ Conda environment creation failed:")
+            print("❌ Conda environment creation failed:")
             print(f"   {result.stderr[:500]}")
             return False
 
@@ -1157,7 +1230,7 @@ def _create_conda_env(env_name: str, python_version: Optional[str] = None, env_f
         return True
 
     except subprocess.TimeoutExpired:
-        print(f"❌ Conda environment creation timed out (>30 minutes)")
+        print("❌ Conda environment creation timed out (>30 minutes)")
         return False
     except Exception as e:
         print(f"❌ Error creating conda environment: {str(e)}")
@@ -1177,10 +1250,7 @@ def _get_conda_env_python(env_name: str) -> Optional[str]:
     try:
         # Get conda environment info
         result = subprocess.run(
-            ["conda", "env", "list"],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["conda", "env", "list"], capture_output=True, text=True, timeout=10
         )
 
         if result.returncode != 0:
@@ -1188,14 +1258,14 @@ def _get_conda_env_python(env_name: str) -> Optional[str]:
             return None
 
         # Parse environment list to find path
-        for line in result.stdout.split('\n'):
-            if env_name in line and not line.startswith('#'):
+        for line in result.stdout.split("\n"):
+            if env_name in line and not line.startswith("#"):
                 parts = line.split()
                 if len(parts) >= 2:
                     env_path = parts[-1]  # Last part is the path
 
                     # Construct Python path
-                    if os.name == 'nt':  # Windows
+                    if os.name == "nt":  # Windows
                         python_path = Path(env_path) / "python.exe"
                     else:  # Linux/Mac
                         python_path = Path(env_path) / "bin" / "python"
@@ -1209,7 +1279,7 @@ def _get_conda_env_python(env_name: str) -> Optional[str]:
             ["conda", "run", "-n", env_name, "which", "python"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
 
         if result.returncode == 0:
@@ -1241,7 +1311,7 @@ def _get_conda_pip(env_name: str) -> Optional[str]:
         return None
 
     # Check if pip exists in conda environment
-    if os.name == 'nt':  # Windows
+    if os.name == "nt":  # Windows
         pip_path = Path(python_path).parent / "pip.exe"
     else:  # Linux/Mac
         pip_path = Path(python_path).parent / "pip"
@@ -1256,6 +1326,7 @@ def _get_conda_pip(env_name: str) -> Optional[str]:
 # ============================================================================
 # Virtual Environment Management Helpers
 # ============================================================================
+
 
 def _create_venv_with_python(venv_path: Path, python_executable: str) -> bool:
     """
@@ -1276,7 +1347,7 @@ def _create_venv_with_python(venv_path: Path, python_executable: str) -> bool:
             [python_executable, "-m", "venv", str(venv_path)],
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=120,
         )
 
         if result.returncode != 0:
@@ -1284,7 +1355,7 @@ def _create_venv_with_python(venv_path: Path, python_executable: str) -> bool:
             return False
 
         # Verify venv was created
-        if os.name == 'nt':
+        if os.name == "nt":
             venv_python = venv_path / "Scripts" / "python.exe"
         else:
             venv_python = venv_path / "bin" / "python"
@@ -1293,7 +1364,7 @@ def _create_venv_with_python(venv_path: Path, python_executable: str) -> bool:
             print(f"❌ venv Python not found at {venv_python}")
             return False
 
-        print(f"✅ Virtual environment created successfully")
+        print("✅ Virtual environment created successfully")
         return True
 
     except Exception as e:
@@ -1313,15 +1384,16 @@ def _install_with_conda(repo_path: str, conda_env_file: Path) -> Dict[str, Any]:
         Installation result with status and any errors
     """
     try:
-        import sys
 
         # Generate unique conda environment name
         env_name = _generate_conda_env_name(repo_path)
 
-        print(f"📦 Installing with Conda")
+        print("📦 Installing with Conda")
         print(f"   Environment name: {env_name}")
         print(f"   Environment file: {conda_env_file.name}")
-        print(f"   This creates an ISOLATED conda environment (won't affect your main env)\n")
+        print(
+            "   This creates an ISOLATED conda environment (won't affect your main env)\n"
+        )
 
         # Step 1: Create conda environment from environment.yml
         success = _create_conda_env(env_name, env_file=conda_env_file)
@@ -1347,7 +1419,7 @@ def _install_with_conda(repo_path: str, conda_env_file: Path) -> Dict[str, Any]:
             }
 
         # Step 3: Verify installation
-        print(f"\n✅ Conda environment created successfully!")
+        print("\n✅ Conda environment created successfully!")
         print(f"   Environment name: {env_name}")
         print(f"   Python: {conda_python}")
         print(f"   Pip: {conda_pip}")
@@ -1356,12 +1428,13 @@ def _install_with_conda(repo_path: str, conda_env_file: Path) -> Dict[str, Any]:
 
         # Get Python version from conda env
         version_result = subprocess.run(
-            [conda_python, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10
+            [conda_python, "--version"], capture_output=True, text=True, timeout=10
         )
-        python_version = version_result.stdout.strip() if version_result.returncode == 0 else "unknown"
+        python_version = (
+            version_result.stdout.strip()
+            if version_result.returncode == 0
+            else "unknown"
+        )
 
         return {
             "success": True,
@@ -1414,14 +1487,14 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
 
         if conda_env_file and not _check_conda_available():
             print(f"⚠️  Found {conda_env_file.name} but conda is not installed")
-            print(f"   Install conda: https://docs.conda.io/en/latest/miniconda.html")
-            print(f"   Falling back to pip installation...\n")
+            print("   Install conda: https://docs.conda.io/en/latest/miniconda.html")
+            print("   Falling back to pip installation...\n")
             use_conda = False
         elif use_conda:
             print(f"✅ Detected conda requirements: {conda_env_file.name}")
-            print(f"   Will use conda for installation\n")
+            print("   Will use conda for installation\n")
         else:
-            print(f"✅ Using pip/venv for installation\n")
+            print("✅ Using pip/venv for installation\n")
 
         # =====================================================================
         # CONDA INSTALLATION PATH
@@ -1439,20 +1512,30 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
         compat_check = check_python_compatibility.invoke({"repo_path": repo_path})
 
         required_version = compat_check.get("required_version")
-        current_version = compat_check.get("current_version", f"{sys.version_info.major}.{sys.version_info.minor}")
+        current_version = compat_check.get(
+            "current_version", f"{sys.version_info.major}.{sys.version_info.minor}"
+        )
         is_compatible = compat_check.get("compatible", True)
 
         print(f"   Current Python: {current_version}")
         print(f"   Required Python: {required_version or 'not specified'}")
 
         # Step 2: Determine if we need a different Python version
-        target_python_version = _parse_required_python_version(required_version) if required_version else None
+        target_python_version = (
+            _parse_required_python_version(required_version)
+            if required_version
+            else None
+        )
 
         python_executable = None  # Will hold the Python to use for venv
 
         if target_python_version and target_python_version != current_version:
-            print(f"\n⚠️  Repository requires Python {target_python_version}, but you have {current_version}")
-            print(f"   Attempting to create environment with Python {target_python_version}...\n")
+            print(
+                f"\n⚠️  Repository requires Python {target_python_version}, but you have {current_version}"
+            )
+            print(
+                f"   Attempting to create environment with Python {target_python_version}...\n"
+            )
 
             # Try pyenv first
             if _check_pyenv_available():
@@ -1469,29 +1552,41 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
                     python_executable = shutil.which(f"python{target_python_version}")
                     if not python_executable:
                         print(f"❌ Python {target_python_version} not found on system")
-                        print(f"   Install options:")
-                        print(f"   1. Install pyenv: curl https://pyenv.run | bash")
-                        print(f"   2. Install Python {target_python_version} system-wide")
-                        print(f"   3. Use conda: conda create -n env python={target_python_version}")
-                        print(f"\n   Falling back to current Python {current_version} (may fail)...\n")
+                        print("   Install options:")
+                        print("   1. Install pyenv: curl https://pyenv.run | bash")
+                        print(
+                            f"   2. Install Python {target_python_version} system-wide"
+                        )
+                        print(
+                            f"   3. Use conda: conda create -n env python={target_python_version}"
+                        )
+                        print(
+                            f"\n   Falling back to current Python {current_version} (may fail)...\n"
+                        )
                         python_executable = sys.executable
             else:
-                print(f"⚠️  pyenv not available")
-                print(f"   To install pyenv: curl https://pyenv.run | bash")
+                print("⚠️  pyenv not available")
+                print("   To install pyenv: curl https://pyenv.run | bash")
                 print(f"   Checking for system Python {target_python_version}...\n")
 
                 # Try to find this Python version on the system
                 python_executable = shutil.which(f"python{target_python_version}")
                 if not python_executable:
                     print(f"❌ Python {target_python_version} not found")
-                    print(f"   Falling back to current Python {current_version} (may fail)...\n")
+                    print(
+                        f"   Falling back to current Python {current_version} (may fail)...\n"
+                    )
                     python_executable = sys.executable
                 else:
-                    print(f"✅ Found system Python {target_python_version} at {python_executable}\n")
+                    print(
+                        f"✅ Found system Python {target_python_version} at {python_executable}\n"
+                    )
         else:
             # Current Python is compatible or no specific version required
             if not is_compatible:
-                print(f"⚠️  Warning: Compatibility check suggests issues, but continuing with Python {current_version}\n")
+                print(
+                    f"⚠️  Warning: Compatibility check suggests issues, but continuing with Python {current_version}\n"
+                )
             else:
                 print(f"✅ Python {current_version} is compatible\n")
             python_executable = sys.executable
@@ -1499,18 +1594,20 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
         # Step 3: Create virtual environment
         if venv_path.exists():
             print(f"📦 Virtual environment already exists at {venv_path}")
-            print(f"   To recreate with different Python, delete it first: rm -rf {venv_path}\n")
+            print(
+                f"   To recreate with different Python, delete it first: rm -rf {venv_path}\n"
+            )
         else:
             # Create venv with the selected Python
             if python_executable == sys.executable:
                 # Use built-in venv module
-                print(f"📦 Creating virtual environment with current Python...")
+                print("📦 Creating virtual environment with current Python...")
                 try:
                     venv.create(venv_path, with_pip=True)
-                    print(f"✅ Virtual environment created!\n")
+                    print("✅ Virtual environment created!\n")
                 except Exception as e:
                     print(f"❌ venv.create() failed: {e}")
-                    print(f"   Trying subprocess method instead...\n")
+                    print("   Trying subprocess method instead...\n")
                     success = _create_venv_with_python(venv_path, python_executable)
                     if not success:
                         return {
@@ -1532,7 +1629,7 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
                 print()
 
         # Determine venv python and pip paths
-        if os.name == 'nt':  # Windows
+        if os.name == "nt":  # Windows
             venv_python = venv_path / "Scripts" / "python.exe"
             venv_pip = venv_path / "Scripts" / "pip.exe"
         else:  # Linux/Mac
@@ -1545,13 +1642,14 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
 
         # CRITICAL: Verify venv was created properly
         if not venv_python.exists():
-            print(f"❌ Virtual environment creation failed!")
+            print("❌ Virtual environment creation failed!")
             print(f"   Expected Python at: {venv_python}")
-            print(f"   File does not exist.")
-            print(f"\n   Attempting to recreate with subprocess method...\n")
+            print("   File does not exist.")
+            print("\n   Attempting to recreate with subprocess method...\n")
 
             # Remove broken venv
             import shutil
+
             if venv_path.exists():
                 shutil.rmtree(venv_path)
 
@@ -1568,14 +1666,14 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
         # Verify pip exists
         if not venv_pip.exists():
             print(f"⚠️  Warning: pip not found at {venv_pip}")
-            print(f"   Attempting to bootstrap pip...\n")
+            print("   Attempting to bootstrap pip...\n")
 
             # Try to bootstrap pip
             bootstrap_result = subprocess.run(
                 [str(venv_python), "-m", "ensurepip", "--upgrade"],
                 capture_output=True,
                 text=True,
-                timeout=120
+                timeout=120,
             )
 
             if bootstrap_result.returncode != 0 or not venv_pip.exists():
@@ -1584,25 +1682,29 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
                 # We'll use python -m pip for all subsequent commands
                 venv_pip = f"{venv_python} -m pip"
             else:
-                print(f"✅ Pip bootstrapped successfully\n")
+                print("✅ Pip bootstrapped successfully\n")
 
         # Upgrade pip in the venv first
-        print(f"📦 Upgrading pip in virtual environment...")
+        print("📦 Upgrading pip in virtual environment...")
         upgrade_result = subprocess.run(
             [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=120,
         )
         if upgrade_result.returncode == 0:
-            print(f"✅ Pip upgraded successfully!\n")
+            print("✅ Pip upgraded successfully!\n")
         else:
-            print(f"⚠️  Pip upgrade had issues (continuing anyway): {upgrade_result.stderr[:200]}\n")
+            print(
+                f"⚠️  Pip upgrade had issues (continuing anyway): {upgrade_result.stderr[:200]}\n"
+            )
 
         # Try multiple paths to find the src directory
         possible_paths = [
             str(Path(__file__).parent.parent),  # From tools/ to src/
-            str(Path(__file__).parent.parent.parent / "src"),  # From paper_reproduction_agent/src/tools to src
+            str(
+                Path(__file__).parent.parent.parent / "src"
+            ),  # From paper_reproduction_agent/src/tools to src
             os.path.join(os.path.dirname(__file__), "..", ".."),  # Relative path
         ]
 
@@ -1622,12 +1724,18 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
             for attempt in result["attempts"]:
                 if attempt.get("command"):
                     # Replace 'pip' with venv pip in the command
-                    venv_command = attempt["command"].replace("pip install", f"{venv_pip} install")
+                    venv_command = attempt["command"].replace(
+                        "pip install", f"{venv_pip} install"
+                    )
 
-                    print(f"\n📦 Installing dependencies using strategy: {attempt['strategy']}")
+                    print(
+                        f"\n📦 Installing dependencies using strategy: {attempt['strategy']}"
+                    )
                     print(f"   Command: {venv_command}")
                     print(f"   Virtual environment: {venv_path}")
-                    print(f"   (This may take several minutes for large packages like PyTorch...)\n")
+                    print(
+                        "   (This may take several minutes for large packages like PyTorch...)\n"
+                    )
 
                     # Use Popen to show real-time output
                     process = subprocess.Popen(
@@ -1638,39 +1746,48 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
                         text=True,
                         cwd=repo_path,
                         bufsize=1,  # Line buffered
-                        universal_newlines=True
+                        universal_newlines=True,
                     )
 
                     # Stream output line by line
                     stdout_lines = []
                     for line in process.stdout:
-                        print(line, end='')  # Show real-time progress
+                        print(line, end="")  # Show real-time progress
                         stdout_lines.append(line)
 
                     # Wait for completion
                     returncode = process.wait(timeout=600)
-                    full_output = ''.join(stdout_lines)
+                    full_output = "".join(stdout_lines)
 
                     if returncode == 0:
-                        print(f"\n✅ Installation successful with {attempt['strategy']} strategy!\n")
+                        print(
+                            f"\n✅ Installation successful with {attempt['strategy']} strategy!\n"
+                        )
                         print(f"🐍 Virtual environment created at: {venv_path}")
-                        print(f"   Python version: {target_python_version or current_version}")
+                        print(
+                            f"   Python version: {target_python_version or current_version}"
+                        )
                         print(f"   Python: {venv_python}")
 
                         # Check if we're using python -m pip or direct pip
                         if isinstance(venv_pip, str) and "-m pip" in venv_pip:
-                            print(f"   Pip: Using '{venv_python} -m pip' (no direct pip binary)")
+                            print(
+                                f"   Pip: Using '{venv_python} -m pip' (no direct pip binary)"
+                            )
                         else:
                             print(f"   Pip: {venv_pip}")
 
-                        print(f"   To activate: source {venv_path}/bin/activate (Linux/Mac) or {venv_path}\\Scripts\\activate (Windows)\n")
+                        print(
+                            f"   To activate: source {venv_path}/bin/activate (Linux/Mac) or {venv_path}\\Scripts\\activate (Windows)\n"
+                        )
                         return {
                             "success": True,
                             "strategy_used": attempt["strategy"],
                             "venv_path": str(venv_path),
                             "venv_python": str(venv_python),
                             "venv_pip": str(venv_pip),
-                            "python_version_used": target_python_version or current_version,
+                            "python_version_used": target_python_version
+                            or current_version,
                             "python_version_required": required_version,
                             "python_executable_used": python_executable,
                             "stdout": full_output,
@@ -1678,7 +1795,9 @@ def smart_install_dependencies(repo_path: str) -> Dict[str, Any]:
                             "warnings": attempt.get("warning", ""),
                         }
                     else:
-                        print(f"\n❌ Installation failed with {attempt['strategy']} strategy, trying next...\n")
+                        print(
+                            f"\n❌ Installation failed with {attempt['strategy']} strategy, trying next...\n"
+                        )
                         # Add error to resolver for pattern detection
                         resolver.error_detector.add_error(full_output)
 

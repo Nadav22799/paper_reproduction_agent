@@ -1,6 +1,6 @@
 """File logger to save execution logs."""
 
-import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -22,7 +22,7 @@ class FileLogger:
         self.log_file = self.log_dir / f"execution_{timestamp}.log"
 
         # Open file for writing
-        self.file_handle = open(self.log_file, 'w', encoding='utf-8')
+        self.file_handle = open(self.log_file, "w", encoding="utf-8")
 
         self.log(f"=== Execution Log Started at {datetime.now()} ===\n")
 
@@ -33,7 +33,7 @@ class FileLogger:
             message: Message to log
         """
         # Print to console
-        print(message, end='')
+        print(message, end="")
 
         # Write to file
         self.file_handle.write(message)
@@ -54,14 +54,15 @@ class FileLogger:
         self.close()
 
 
-import sys
+
+
 
 class TeeOutput:
     """Redirect stdout to both console and file."""
 
     def __init__(self, log_file):
         self.terminal = sys.stdout
-        self.log_file = open(log_file, 'w', encoding='utf-8')
+        self.log_file = open(log_file, "w", encoding="utf-8")
 
     def write(self, message):
         self.terminal.write(message)

@@ -25,7 +25,9 @@ def check_and_display_rate_limit(g: Github) -> bool:
         total = rate_limit.core.limit
         reset_time = rate_limit.core.reset.timestamp() - time.time()
 
-        print(f"📊 GitHub API: {remaining}/{total} calls remaining (resets in {int(reset_time/60)}m)")
+        print(
+            f"📊 GitHub API: {remaining}/{total} calls remaining (resets in {int(reset_time/60)}m)"
+        )
 
         return remaining > 10
     except Exception:
@@ -33,7 +35,12 @@ def check_and_display_rate_limit(g: Github) -> bool:
 
 
 @tool
-def search_github_repos(query: str, language: Optional[str] = None, max_results: int = 5, fetch_topics: bool = False) -> List[Dict[str, Any]]:
+def search_github_repos(
+    query: str,
+    language: Optional[str] = None,
+    max_results: int = 5,
+    fetch_topics: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Search GitHub for repositories matching the query.
 
@@ -55,8 +62,12 @@ def search_github_repos(query: str, language: Optional[str] = None, max_results:
             rate_limit = g.get_rate_limit()
             reset_time = rate_limit.core.reset.timestamp() - time.time()
             if reset_time > 300:  # More than 5 minutes wait
-                return [{"error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes. Skipping GitHub search."}]
-            print(f"⚠️  Low on GitHub API calls. Proceeding carefully...")
+                return [
+                    {
+                        "error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes. Skipping GitHub search."
+                    }
+                ]
+            print("⚠️  Low on GitHub API calls. Proceeding carefully...")
 
         # Build search query
         search_query = query
@@ -76,19 +87,23 @@ def search_github_repos(query: str, language: Optional[str] = None, max_results:
                     except (RateLimitExceededException, Exception) as e:
                         print(f"⚠️  Skipping topics for {repo.full_name}: {str(e)[:50]}")
 
-                results.append({
-                    "name": repo.name,
-                    "full_name": repo.full_name,
-                    "description": repo.description or "",
-                    "stars": repo.stargazers_count,
-                    "url": repo.html_url,
-                    "clone_url": repo.clone_url,
-                    "language": repo.language or "Unknown",
-                    "topics": topics if fetch_topics else [],
-                    "has_readme": True,  # Most repos have README
-                })
+                results.append(
+                    {
+                        "name": repo.name,
+                        "full_name": repo.full_name,
+                        "description": repo.description or "",
+                        "stars": repo.stargazers_count,
+                        "url": repo.html_url,
+                        "clone_url": repo.clone_url,
+                        "language": repo.language or "Unknown",
+                        "topics": topics if fetch_topics else [],
+                        "has_readme": True,  # Most repos have README
+                    }
+                )
             except RateLimitExceededException:
-                print(f"⚠️  Rate limit hit after {len(results)} repos. Returning what we have.")
+                print(
+                    f"⚠️  Rate limit hit after {len(results)} repos. Returning what we have."
+                )
                 break
             except Exception as e:
                 print(f"⚠️  Error processing repo {i}: {str(e)[:50]}")
@@ -96,8 +111,12 @@ def search_github_repos(query: str, language: Optional[str] = None, max_results:
 
         return results if results else [{"message": "No repositories found"}]
 
-    except RateLimitExceededException as e:
-        return [{"error": "GitHub rate limit exceeded. Please add GITHUB_TOKEN to .env or wait before retrying."}]
+    except RateLimitExceededException:
+        return [
+            {
+                "error": "GitHub rate limit exceeded. Please add GITHUB_TOKEN to .env or wait before retrying."
+            }
+        ]
     except Exception as e:
         return [{"error": f"GitHub search failed: {str(e)}"}]
 
@@ -121,7 +140,9 @@ def get_repo_contents(repo_full_name: str, path: str = "") -> List[Dict[str, Any
         # Check rate limit
         rate_limit = g.get_rate_limit()
         if rate_limit.core.remaining < 5:
-            return [{"error": "GitHub rate limit too low. Skipping repo contents fetch."}]
+            return [
+                {"error": "GitHub rate limit too low. Skipping repo contents fetch."}
+            ]
 
         repo = g.get_repo(repo_full_name)
         contents = repo.get_contents(path)
@@ -131,13 +152,17 @@ def get_repo_contents(repo_full_name: str, path: str = "") -> List[Dict[str, Any
 
         results = []
         for content in contents:
-            results.append({
-                "name": content.name,
-                "path": content.path,
-                "type": content.type,
-                "size": content.size if hasattr(content, 'size') else 0,
-                "download_url": content.download_url if content.type == "file" else None,
-            })
+            results.append(
+                {
+                    "name": content.name,
+                    "path": content.path,
+                    "type": content.type,
+                    "size": content.size if hasattr(content, "size") else 0,
+                    "download_url": (
+                        content.download_url if content.type == "file" else None
+                    ),
+                }
+            )
 
         return results
 
@@ -171,8 +196,8 @@ def get_file_content(repo_full_name: str, file_path: str) -> str:
         repo = g.get_repo(repo_full_name)
         file_content = repo.get_contents(file_path)
 
-        if hasattr(file_content, 'decoded_content'):
-            return file_content.decoded_content.decode('utf-8')
+        if hasattr(file_content, "decoded_content"):
+            return file_content.decoded_content.decode("utf-8")
         else:
             return "File is too large or binary"
 
@@ -183,7 +208,9 @@ def get_file_content(repo_full_name: str, file_path: str) -> str:
 
 
 @tool
-def search_github_code(query: str, language: Optional[str] = None, max_results: int = 5) -> List[Dict[str, Any]]:
+def search_github_code(
+    query: str, language: Optional[str] = None, max_results: int = 5
+) -> List[Dict[str, Any]]:
     """
     Search for code snippets on GitHub.
 
@@ -204,7 +231,11 @@ def search_github_code(query: str, language: Optional[str] = None, max_results: 
         if rate_limit.core.remaining < 10:
             reset_time = rate_limit.core.reset.timestamp() - time.time()
             if reset_time > 300:
-                return [{"error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes. Skipping code search."}]
+                return [
+                    {
+                        "error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes. Skipping code search."
+                    }
+                ]
 
         search_query = query
         if language:
@@ -215,15 +246,19 @@ def search_github_code(query: str, language: Optional[str] = None, max_results: 
         results = []
         for i, code in enumerate(code_results[:max_results]):
             try:
-                results.append({
-                    "name": code.name,
-                    "path": code.path,
-                    "repository": code.repository.full_name,
-                    "url": code.html_url,
-                    "repo_url": code.repository.html_url,
-                })
+                results.append(
+                    {
+                        "name": code.name,
+                        "path": code.path,
+                        "repository": code.repository.full_name,
+                        "url": code.html_url,
+                        "repo_url": code.repository.html_url,
+                    }
+                )
             except RateLimitExceededException:
-                print(f"⚠️  Rate limit hit after {len(results)} code results. Returning what we have.")
+                print(
+                    f"⚠️  Rate limit hit after {len(results)} code results. Returning what we have."
+                )
                 break
             except Exception as e:
                 print(f"⚠️  Error processing code result {i}: {str(e)[:50]}")
@@ -264,7 +299,9 @@ def search_papers_with_code(paper_title: str) -> Dict[str, Any]:
                 paper_id = paper.get("id")
 
                 # Get implementations
-                impl_url = f"https://paperswithcode.com/api/v1/papers/{paper_id}/repositories/"
+                impl_url = (
+                    f"https://paperswithcode.com/api/v1/papers/{paper_id}/repositories/"
+                )
                 impl_response = requests.get(impl_url, timeout=10)
 
                 implementations = []
@@ -315,7 +352,7 @@ def clone_repository(repo_url: str, target_dir: str) -> str:
             ["git", "clone", repo_url, target_dir],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
         )
 
         if result.returncode == 0:
@@ -327,7 +364,9 @@ def clone_repository(repo_url: str, target_dir: str) -> str:
         return f"Error cloning repository: {str(e)}"
 
 
-def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> List[Dict[str, Any]]:
+def search_github_for_arxiv_reference(
+    arxiv_id: str, max_results: int = 10
+) -> List[Dict[str, Any]]:
     """
     Search GitHub for repositories that reference a specific arXiv paper.
 
@@ -342,7 +381,7 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
         List of repository information dictionaries with confidence scores
     """
     # Clean the arXiv ID (remove version suffix if present)
-    clean_id = re.sub(r'v\d+$', '', arxiv_id)
+    clean_id = re.sub(r"v\d+$", "", arxiv_id)
 
     # Search patterns to try (in order of specificity)
     search_patterns = [
@@ -353,8 +392,18 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
 
     # Patterns to EXCLUDE (paper collections, awesome lists, not implementations)
     exclude_patterns = [
-        'awesome', 'paper', 'list', 'survey', 'collection', 'reading',
-        'starred', 'backup', 'fork', 'mirror', 'copy', 'clone'
+        "awesome",
+        "paper",
+        "list",
+        "survey",
+        "collection",
+        "reading",
+        "starred",
+        "backup",
+        "fork",
+        "mirror",
+        "copy",
+        "clone",
     ]
 
     try:
@@ -366,7 +415,11 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
             rate_limit = g.get_rate_limit()
             reset_time = rate_limit.core.reset.timestamp() - time.time()
             if reset_time > 300:
-                return [{"error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes."}]
+                return [
+                    {
+                        "error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes."
+                    }
+                ]
 
         all_repos = {}  # Use dict to deduplicate by repo full_name
 
@@ -384,7 +437,7 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
                 except:
                     pass  # If we can't check count, try iterating anyway
 
-                for code in code_results[:max_results * 2]:  # Get more to filter
+                for code in code_results[: max_results * 2]:  # Get more to filter
                     try:
                         repo = code.repository
                         repo_key = repo.full_name
@@ -402,13 +455,15 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
                         )
 
                         # Check if README is in a subdirectory (likely a starred/cloned collection)
-                        is_nested_readme = code.path.count('/') > 1
+                        is_nested_readme = code.path.count("/") > 1
 
                         # Determine confidence level
                         if is_paper_collection:
                             confidence = "low"  # Paper collection, not implementation
                         elif is_nested_readme:
-                            confidence = "low"  # Nested README, likely not the main repo
+                            confidence = (
+                                "low"  # Nested README, likely not the main repo
+                            )
                         else:
                             confidence = "high"  # Likely the actual implementation
 
@@ -426,9 +481,9 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
                             "is_paper_collection": is_paper_collection,
                         }
                     except RateLimitExceededException:
-                        print(f"⚠️  Rate limit hit during arXiv search")
+                        print("⚠️  Rate limit hit during arXiv search")
                         break
-                    except Exception as e:
+                    except Exception:
                         continue
 
             except RateLimitExceededException:
@@ -447,30 +502,42 @@ def search_github_for_arxiv_reference(arxiv_id: str, max_results: int = 10) -> L
         results = list(all_repos.values())
 
         # Sort: high confidence first, then by stars
-        results.sort(key=lambda x: (
-            0 if x.get("confidence") == "high" else 1,
-            -x.get("stars", 0)
-        ))
+        results.sort(
+            key=lambda x: (
+                0 if x.get("confidence") == "high" else 1,
+                -x.get("stars", 0),
+            )
+        )
 
         # Filter to return high confidence first, but include others if none found
         high_confidence = [r for r in results if r.get("confidence") == "high"]
 
         if high_confidence:
-            print(f"🔍 Found {len(high_confidence)} high-confidence repo(s) referencing arXiv:{clean_id}")
+            print(
+                f"🔍 Found {len(high_confidence)} high-confidence repo(s) referencing arXiv:{clean_id}"
+            )
             return high_confidence[:max_results]
         elif results:
-            print(f"🔍 Found {len(results)} repo(s) referencing arXiv:{clean_id} (mostly paper collections)")
+            print(
+                f"🔍 Found {len(results)} repo(s) referencing arXiv:{clean_id} (mostly paper collections)"
+            )
             return results[:max_results]
         else:
             return [{"message": f"No repos found referencing arXiv:{clean_id}"}]
 
     except RateLimitExceededException:
-        return [{"error": "GitHub rate limit exceeded. Please add GITHUB_TOKEN to .env or wait."}]
+        return [
+            {
+                "error": "GitHub rate limit exceeded. Please add GITHUB_TOKEN to .env or wait."
+            }
+        ]
     except Exception as e:
         return [{"error": f"GitHub arXiv search failed: {str(e)}"}]
 
 
-def search_github_by_paper_name(paper_title: str, max_results: int = 5) -> List[Dict[str, Any]]:
+def search_github_by_paper_name(
+    paper_title: str, max_results: int = 5
+) -> List[Dict[str, Any]]:
     """
     Search GitHub for repositories by extracting key terms from paper title.
 
@@ -492,20 +559,36 @@ def search_github_by_paper_name(paper_title: str, max_results: int = 5) -> List[
     search_terms = []
 
     # Extract acronyms (2+ capital letters)
-    acronyms = re.findall(r'\b([A-Z][A-Z0-9]{1,})\b', paper_title)
+    acronyms = re.findall(r"\b([A-Z][A-Z0-9]{1,})\b", paper_title)
     search_terms.extend(acronyms)
 
     # Extract terms from title before colon (often the method name)
-    if ':' in paper_title:
-        before_colon = paper_title.split(':')[0].strip()
+    if ":" in paper_title:
+        before_colon = paper_title.split(":")[0].strip()
         # Remove common words
-        stop_words = {'a', 'an', 'the', 'for', 'of', 'in', 'on', 'with', 'via', 'using', 'towards'}
-        words = [w for w in before_colon.split() if w.lower() not in stop_words and len(w) > 2]
+        stop_words = {
+            "a",
+            "an",
+            "the",
+            "for",
+            "of",
+            "in",
+            "on",
+            "with",
+            "via",
+            "using",
+            "towards",
+        }
+        words = [
+            w
+            for w in before_colon.split()
+            if w.lower() not in stop_words and len(w) > 2
+        ]
         if len(words) <= 3:  # Short enough to be a method name
             search_terms.append(before_colon)
 
     # Extract terms in parentheses (often acronyms)
-    parens = re.findall(r'\(([^)]+)\)', paper_title)
+    parens = re.findall(r"\(([^)]+)\)", paper_title)
     search_terms.extend(parens)
 
     # Remove duplicates and filter
@@ -522,14 +605,20 @@ def search_github_by_paper_name(paper_title: str, max_results: int = 5) -> List[
             rate_limit = g.get_rate_limit()
             reset_time = rate_limit.core.reset.timestamp() - time.time()
             if reset_time > 300:
-                return [{"error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes."}]
+                return [
+                    {
+                        "error": f"GitHub rate limit exceeded. Resets in {int(reset_time/60)} minutes."
+                    }
+                ]
 
         all_repos = {}
 
         for term in search_terms[:3]:  # Limit to top 3 terms
             try:
                 # Search for repos with this name
-                repos = g.search_repositories(query=f"{term} in:name", sort="stars", order="desc")
+                repos = g.search_repositories(
+                    query=f"{term} in:name", sort="stars", order="desc"
+                )
 
                 for repo in repos[:max_results]:
                     try:
@@ -541,7 +630,9 @@ def search_github_by_paper_name(paper_title: str, max_results: int = 5) -> List[
                         # Check if repo name closely matches search term
                         name_lower = repo.name.lower()
                         term_lower = term.lower()
-                        is_exact_match = name_lower == term_lower or term_lower in name_lower
+                        is_exact_match = (
+                            name_lower == term_lower or term_lower in name_lower
+                        )
 
                         all_repos[repo_key] = {
                             "name": repo.name,
@@ -570,15 +661,20 @@ def search_github_by_paper_name(paper_title: str, max_results: int = 5) -> List[
         results = list(all_repos.values())
 
         # Sort by exact match first, then stars
-        results.sort(key=lambda x: (
-            0 if x.get("is_exact_match") else 1,
-            -x.get("stars", 0)
-        ))
+        results.sort(
+            key=lambda x: (0 if x.get("is_exact_match") else 1, -x.get("stars", 0))
+        )
 
         if results:
-            print(f"🔍 Found {len(results)} repo(s) matching paper name terms: {search_terms[:3]}")
+            print(
+                f"🔍 Found {len(results)} repo(s) matching paper name terms: {search_terms[:3]}"
+            )
 
-        return results[:max_results] if results else [{"message": f"No repos found for terms: {search_terms}"}]
+        return (
+            results[:max_results]
+            if results
+            else [{"message": f"No repos found for terms: {search_terms}"}]
+        )
 
     except RateLimitExceededException:
         return [{"error": "GitHub rate limit exceeded."}]
@@ -587,9 +683,7 @@ def search_github_by_paper_name(paper_title: str, max_results: int = 5) -> List[
 
 
 def web_search_for_implementation(
-    paper_title: str,
-    arxiv_id: str = None,
-    authors: List[str] = None
+    paper_title: str, arxiv_id: str = None, authors: List[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Use Gemini with Google Search to find GitHub implementations of a paper.
@@ -612,10 +706,12 @@ def web_search_for_implementation(
             from google import genai
             from google.genai import types
         except ImportError:
-            return [{"error": "google-genai not installed. Run: pip install google-genai"}]
+            return [
+                {"error": "google-genai not installed. Run: pip install google-genai"}
+            ]
 
     except ImportError:
-            return [{"error": "google-genai not found. Please install `google-genai`."}]
+        return [{"error": "google-genai not found. Please install `google-genai`."}]
 
     result = {
         "candidates": [],
@@ -679,11 +775,11 @@ Only include repositories with GitHub URLs."""
 
         # Use Gemini with search grounding
         response = client.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model="gemini-2.0-flash-exp",
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
+            ),
         )
 
         if response.text:
@@ -692,7 +788,7 @@ Only include repositories with GitHub URLs."""
             # Try to parse JSON from response
             try:
                 # Find JSON in response (may be wrapped in markdown code blocks)
-                json_match = re.search(r'\{[\s\S]*\}', response.text)
+                json_match = re.search(r"\{[\s\S]*\}", response.text)
                 if json_match:
                     parsed = json.loads(json_match.group())
                     candidates = parsed.get("candidates", [])
@@ -701,26 +797,49 @@ Only include repositories with GitHub URLs."""
                     valid_candidates = []
                     for c in candidates:
                         url = c.get("url", "")
-                        if "github.com" in url.lower() and c.get("confidence") == "high":
-                            valid_candidates.append({
-                                "url": url,
-                                "name": c.get("name", ""),
-                                "confidence": "high",
-                                "reason": c.get("reason", ""),
-                                "source": "web_search"
-                            })
+                        if (
+                            "github.com" in url.lower()
+                            and c.get("confidence") == "high"
+                        ):
+                            valid_candidates.append(
+                                {
+                                    "url": url,
+                                    "name": c.get("name", ""),
+                                    "confidence": "high",
+                                    "reason": c.get("reason", ""),
+                                    "source": "web_search",
+                                }
+                            )
 
                     if valid_candidates:
-                        print(f"🌐 Web search found {len(valid_candidates)} high-confidence candidate(s)")
+                        print(
+                            f"🌐 Web search found {len(valid_candidates)} high-confidence candidate(s)"
+                        )
 
-                    return valid_candidates if valid_candidates else [{"message": "No high-confidence implementations found via web search"}]
+                    return (
+                        valid_candidates
+                        if valid_candidates
+                        else [
+                            {
+                                "message": "No high-confidence implementations found via web search"
+                            }
+                        ]
+                    )
 
             except json.JSONDecodeError:
                 # If JSON parsing fails, try to extract GitHub URLs from text
-                github_urls = re.findall(r'https?://github\.com/[\w\-\.]+/[\w\-\.]+', response.text)
+                github_urls = re.findall(
+                    r"https?://github\.com/[\w\-\.]+/[\w\-\.]+", response.text
+                )
                 if github_urls:
-                    return [{"url": url, "confidence": "medium", "source": "web_search_extracted"}
-                            for url in list(set(github_urls))[:3]]
+                    return [
+                        {
+                            "url": url,
+                            "confidence": "medium",
+                            "source": "web_search_extracted",
+                        }
+                        for url in list(set(github_urls))[:3]
+                    ]
 
         return [{"message": "Web search completed but no implementations found"}]
 

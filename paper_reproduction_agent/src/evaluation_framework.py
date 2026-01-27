@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
-import os
 
 
 class ReproductionEvaluator:
@@ -31,7 +30,7 @@ class ReproductionEvaluator:
         repo_url: str,
         expected_results: Dict[str, float],
         actual_results: Dict[str, float],
-        execution_metadata: Dict[str, Any]
+        execution_metadata: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Evaluate Test A (Code Execution & Reproduction).
 
@@ -48,35 +47,37 @@ class ReproductionEvaluator:
         from .tools.statistical_validation_tools import (
             batch_compare_metrics,
             compute_reproducibility_score,
-            generate_comparison_report
+            generate_comparison_report,
         )
 
         start_time = time.time()
 
         # Compare results
-        comparison = batch_compare_metrics.invoke({
-            "actual_results": actual_results,
-            "expected_results": expected_results,
-            "tolerance_std": 1.0
-        })
+        comparison = batch_compare_metrics.invoke(
+            {
+                "actual_results": actual_results,
+                "expected_results": expected_results,
+                "tolerance_std": 1.0,
+            }
+        )
 
         if isinstance(comparison, str):
             comparison = json.loads(comparison)
 
         # Compute reproducibility score
-        score = compute_reproducibility_score.invoke({
-            "comparison_results": comparison
-        })
+        score = compute_reproducibility_score.invoke({"comparison_results": comparison})
 
         if isinstance(score, str):
             score = json.loads(score)
 
         # Generate report
-        report = generate_comparison_report.invoke({
-            "comparison_results": comparison,
-            "paper_title": paper_id,
-            "reproduction_method": "Test A"
-        })
+        report = generate_comparison_report.invoke(
+            {
+                "comparison_results": comparison,
+                "paper_title": paper_id,
+                "reproduction_method": "Test A",
+            }
+        )
 
         # Evaluation results
         evaluation = {
@@ -92,7 +93,7 @@ class ReproductionEvaluator:
             "reproducible": score.get("reproducible", False),
             "execution_metadata": execution_metadata,
             "evaluation_time_seconds": time.time() - start_time,
-            "report": report
+            "report": report,
         }
 
         # Save results
@@ -107,7 +108,7 @@ class ReproductionEvaluator:
         generated_code_path: str,
         expected_results: Dict[str, float],
         actual_results: Optional[Dict[str, float]],
-        generation_metadata: Dict[str, Any]
+        generation_metadata: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Evaluate Test B (Code Generation from Paper).
 
@@ -125,7 +126,7 @@ class ReproductionEvaluator:
         from .tools.statistical_validation_tools import (
             batch_compare_metrics,
             compute_reproducibility_score,
-            generate_comparison_report
+            generate_comparison_report,
         )
 
         start_time = time.time()
@@ -138,43 +139,51 @@ class ReproductionEvaluator:
 
         # Compare results (if execution succeeded)
         if actual_results:
-            comparison = batch_compare_metrics.invoke({
-                "actual_results": actual_results,
-                "expected_results": expected_results,
-                "tolerance_std": 1.5  # More lenient for generated code
-            })
+            comparison = batch_compare_metrics.invoke(
+                {
+                    "actual_results": actual_results,
+                    "expected_results": expected_results,
+                    "tolerance_std": 1.5,  # More lenient for generated code
+                }
+            )
 
             if isinstance(comparison, str):
                 comparison = json.loads(comparison)
 
-            score = compute_reproducibility_score.invoke({
-                "comparison_results": comparison
-            })
+            score = compute_reproducibility_score.invoke(
+                {"comparison_results": comparison}
+            )
 
             if isinstance(score, str):
                 score = json.loads(score)
 
-            report = generate_comparison_report.invoke({
-                "comparison_results": comparison,
-                "paper_title": paper_id,
-                "reproduction_method": "Test B"
-            })
+            report = generate_comparison_report.invoke(
+                {
+                    "comparison_results": comparison,
+                    "paper_title": paper_id,
+                    "reproduction_method": "Test B",
+                }
+            )
         else:
             comparison = None
-            score = {"overall_score": 0, "grade": "F (Execution Failed)", "reproducible": False}
+            score = {
+                "overall_score": 0,
+                "grade": "F (Execution Failed)",
+                "reproducible": False,
+            }
             report = "Code generation succeeded but execution failed."
 
         # Overall Test B score (weighted combination)
         weights = {
             "methodology_extraction": 0.3,
             "code_quality": 0.3,
-            "results_reproduction": 0.4
+            "results_reproduction": 0.4,
         }
 
         overall_score = (
-            methodology_score * weights["methodology_extraction"] +
-            code_quality["overall_score"] * weights["code_quality"] +
-            score.get("overall_score", 0) * weights["results_reproduction"]
+            methodology_score * weights["methodology_extraction"]
+            + code_quality["overall_score"] * weights["code_quality"]
+            + score.get("overall_score", 0) * weights["results_reproduction"]
         )
 
         evaluation = {
@@ -193,7 +202,7 @@ class ReproductionEvaluator:
             "generation_metadata": generation_metadata,
             "generated_code_path": generated_code_path,
             "evaluation_time_seconds": time.time() - start_time,
-            "report": report
+            "report": report,
         }
 
         # Save results
@@ -216,7 +225,7 @@ class ReproductionEvaluator:
             "parameters",
             "procedure",
             "data_requirements",
-            "evaluation"
+            "evaluation",
         ]
 
         score = 0
@@ -238,10 +247,7 @@ class ReproductionEvaluator:
         code_path = Path(code_path)
 
         if not code_path.exists():
-            return {
-                "overall_score": 0,
-                "error": "Code path does not exist"
-            }
+            return {"overall_score": 0, "error": "Code path does not exist"}
 
         quality_metrics = {
             "has_model": False,
@@ -251,7 +257,7 @@ class ReproductionEvaluator:
             "has_requirements": False,
             "has_readme": False,
             "syntax_valid": True,
-            "overall_score": 0
+            "overall_score": 0,
         }
 
         # Check for essential files
@@ -262,7 +268,7 @@ class ReproductionEvaluator:
             "config.py": "has_config",
             "config.yaml": "has_config",
             "requirements.txt": "has_requirements",
-            "README.md": "has_readme"
+            "README.md": "has_readme",
         }
 
         for filename, metric_key in files_to_check.items():
@@ -272,8 +278,8 @@ class ReproductionEvaluator:
         # Check syntax of Python files
         for py_file in code_path.glob("*.py"):
             try:
-                with open(py_file, 'r') as f:
-                    compile(f.read(), str(py_file), 'exec')
+                with open(py_file, "r") as f:
+                    compile(f.read(), str(py_file), "exec")
             except SyntaxError:
                 quality_metrics["syntax_valid"] = False
 
@@ -285,11 +291,12 @@ class ReproductionEvaluator:
             "has_config": 10,
             "has_requirements": 10,
             "has_readme": 10,
-            "syntax_valid": 5
+            "syntax_valid": 5,
         }
 
         total_score = sum(
-            component_scores[key] for key, value in quality_metrics.items()
+            component_scores[key]
+            for key, value in quality_metrics.items()
             if isinstance(value, bool) and value
         )
 
@@ -317,7 +324,9 @@ class ReproductionEvaluator:
         else:
             return "F (Failed)"
 
-    def _save_evaluation(self, paper_id: str, test_type: str, evaluation: Dict[str, Any]):
+    def _save_evaluation(
+        self, paper_id: str, test_type: str, evaluation: Dict[str, Any]
+    ):
         """Save evaluation results to file.
 
         Args:
@@ -330,14 +339,18 @@ class ReproductionEvaluator:
         paper_dir.mkdir(parents=True, exist_ok=True)
 
         # Save JSON
-        json_path = paper_dir / f"{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(json_path, 'w') as f:
+        json_path = (
+            paper_dir / f"{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        with open(json_path, "w") as f:
             json.dump(evaluation, f, indent=2)
 
         # Save report
         if "report" in evaluation:
-            report_path = paper_dir / f"{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            with open(report_path, 'w') as f:
+            report_path = (
+                paper_dir / f"{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            )
+            with open(report_path, "w") as f:
                 f.write(evaluation["report"])
 
     def generate_benchmark_report(self, test_type: str = "both") -> Dict[str, Any]:
@@ -358,24 +371,29 @@ class ReproductionEvaluator:
 
             for eval_file in paper_dir.glob("*.json"):
                 try:
-                    with open(eval_file, 'r') as f:
+                    with open(eval_file, "r") as f:
                         evaluation = json.load(f)
-                        if test_type == "both" or evaluation.get("test_type") == test_type.split("_")[1].upper():
+                        if (
+                            test_type == "both"
+                            or evaluation.get("test_type")
+                            == test_type.split("_")[1].upper()
+                        ):
                             all_evaluations.append(evaluation)
                 except:
                     continue
 
         if not all_evaluations:
-            return {
-                "error": "No evaluations found"
-            }
+            return {"error": "No evaluations found"}
 
         # Compute statistics
         total_count = len(all_evaluations)
         test_a_count = sum(1 for e in all_evaluations if e.get("test_type") == "A")
         test_b_count = sum(1 for e in all_evaluations if e.get("test_type") == "B")
 
-        avg_score = sum(e.get("reproducibility_score", 0) for e in all_evaluations) / total_count
+        avg_score = (
+            sum(e.get("reproducibility_score", 0) for e in all_evaluations)
+            / total_count
+        )
         success_count = sum(1 for e in all_evaluations if e.get("reproducible", False))
         success_rate = success_count / total_count * 100
 
@@ -387,17 +405,22 @@ class ReproductionEvaluator:
             "success_count": success_count,
             "success_rate_percent": success_rate,
             "grade_distribution": self._compute_grade_distribution(all_evaluations),
-            "evaluations": all_evaluations
+            "evaluations": all_evaluations,
         }
 
         # Save benchmark report
-        benchmark_path = self.results_dir / f"benchmark_{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(benchmark_path, 'w') as f:
+        benchmark_path = (
+            self.results_dir
+            / f"benchmark_{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        with open(benchmark_path, "w") as f:
             json.dump(benchmark, f, indent=2)
 
         return benchmark
 
-    def _compute_grade_distribution(self, evaluations: List[Dict[str, Any]]) -> Dict[str, int]:
+    def _compute_grade_distribution(
+        self, evaluations: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
         """Compute distribution of grades.
 
         Args:

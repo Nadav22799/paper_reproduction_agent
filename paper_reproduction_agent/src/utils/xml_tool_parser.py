@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 
 def extract_tool_calls_from_xml(text: str) -> List[Dict[str, Any]]:
@@ -23,7 +23,7 @@ def extract_tool_calls_from_xml(text: str) -> List[Dict[str, Any]]:
     tool_calls = []
 
     # Find all <tool_call>...</tool_call> blocks
-    pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
+    pattern = r"<tool_call>\s*(.*?)\s*</tool_call>"
     matches = re.findall(pattern, text, re.DOTALL)
 
     for match in matches:
@@ -31,11 +31,13 @@ def extract_tool_calls_from_xml(text: str) -> List[Dict[str, Any]]:
             # Parse the JSON inside the tool_call tag
             tool_data = json.loads(match)
 
-            if 'name' in tool_data:
-                tool_calls.append({
-                    'name': tool_data['name'],
-                    'arguments': tool_data.get('arguments', {})
-                })
+            if "name" in tool_data:
+                tool_calls.append(
+                    {
+                        "name": tool_data["name"],
+                        "arguments": tool_data.get("arguments", {}),
+                    }
+                )
         except json.JSONDecodeError as e:
             print(f"⚠️  Failed to parse tool call JSON: {match[:100]}")
             print(f"   Error: {e}")
@@ -44,7 +46,9 @@ def extract_tool_calls_from_xml(text: str) -> List[Dict[str, Any]]:
     return tool_calls
 
 
-def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: List) -> List[Dict[str, Any]]:
+def execute_tool_calls(
+    tool_calls: List[Dict[str, Any]], tools: List
+) -> List[Dict[str, Any]]:
     """
     Execute a list of tool calls.
 
@@ -61,15 +65,17 @@ def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: List) -> List[Di
     tool_map = {tool.name: tool for tool in tools}
 
     for tool_call in tool_calls:
-        tool_name = tool_call['name']
-        tool_args = tool_call['arguments']
+        tool_name = tool_call["name"]
+        tool_args = tool_call["arguments"]
 
         if tool_name not in tool_map:
-            results.append({
-                'tool': tool_name,
-                'success': False,
-                'error': f"Tool '{tool_name}' not found"
-            })
+            results.append(
+                {
+                    "tool": tool_name,
+                    "success": False,
+                    "error": f"Tool '{tool_name}' not found",
+                }
+            )
             continue
 
         try:
@@ -77,23 +83,17 @@ def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: List) -> List[Di
             tool = tool_map[tool_name]
             result = tool.invoke(tool_args)
 
-            results.append({
-                'tool': tool_name,
-                'success': True,
-                'result': result
-            })
+            results.append({"tool": tool_name, "success": True, "result": result})
 
         except Exception as e:
-            results.append({
-                'tool': tool_name,
-                'success': False,
-                'error': str(e)
-            })
+            results.append({"tool": tool_name, "success": False, "error": str(e)})
 
     return results
 
 
-def create_xml_aware_agent_executor(llm, tools: List, system_prompt: str, max_iterations: int = 10, callbacks=None):
+def create_xml_aware_agent_executor(
+    llm, tools: List, system_prompt: str, max_iterations: int = 10, callbacks=None
+):
     """
     Create an agent executor that can handle XML-formatted tool calls.
 
@@ -140,12 +140,14 @@ def create_xml_aware_agent_executor(llm, tools: List, system_prompt: str, max_it
             except Exception as e:
                 print(f"\n❌ LLM invocation failed: {e}")
                 return {
-                    'messages': all_messages,
-                    'final_answer': f"Error: {str(e)}",
-                    'iterations': iterations,
-                    'error': str(e)
+                    "messages": all_messages,
+                    "final_answer": f"Error: {str(e)}",
+                    "iterations": iterations,
+                    "error": str(e),
                 }
-            response_text = response.content if hasattr(response, 'content') else str(response)
+            response_text = (
+                response.content if hasattr(response, "content") else str(response)
+            )
 
             all_messages.append(response)
 
@@ -155,25 +157,33 @@ def create_xml_aware_agent_executor(llm, tools: List, system_prompt: str, max_it
             if not tool_calls:
                 # No more tool calls, we're done
                 # Extract final answer (text without <think> or <tool_call> tags)
-                final_answer = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
-                final_answer = re.sub(r'<tool_call>.*?</tool_call>', '', final_answer, flags=re.DOTALL)
+                final_answer = re.sub(
+                    r"<think>.*?</think>", "", response_text, flags=re.DOTALL
+                )
+                final_answer = re.sub(
+                    r"<tool_call>.*?</tool_call>", "", final_answer, flags=re.DOTALL
+                )
                 final_answer = final_answer.strip()
 
                 return {
-                    'messages': all_messages,
-                    'final_answer': final_answer,
-                    'iterations': iterations
+                    "messages": all_messages,
+                    "final_answer": final_answer,
+                    "iterations": iterations,
                 }
 
             # Execute the tool calls
-            print(f"\n🔧 Iteration {iterations}: Executing {len(tool_calls)} tool call(s)")
+            print(
+                f"\n🔧 Iteration {iterations}: Executing {len(tool_calls)} tool call(s)"
+            )
             execution_results = execute_tool_calls(tool_calls, tools)
 
             # Format tool results as a message
             tool_results_text = "Tool execution results:\n\n"
-            for i, (tool_call, result) in enumerate(zip(tool_calls, execution_results), 1):
+            for i, (tool_call, result) in enumerate(
+                zip(tool_calls, execution_results), 1
+            ):
                 tool_results_text += f"{i}. {tool_call['name']}:\n"
-                if result['success']:
+                if result["success"]:
                     tool_results_text += f"   Result: {result['result']}\n\n"
                 else:
                     tool_results_text += f"   Error: {result['error']}\n\n"
@@ -186,9 +196,9 @@ def create_xml_aware_agent_executor(llm, tools: List, system_prompt: str, max_it
         # Max iterations reached
         print(f"⚠️ Max iterations ({max_iterations}) reached")
         return {
-            'messages': all_messages,
-            'final_answer': "Max iterations reached",
-            'iterations': iterations
+            "messages": all_messages,
+            "final_answer": "Max iterations reached",
+            "iterations": iterations,
         }
 
     return agent_executor

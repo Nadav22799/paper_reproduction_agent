@@ -43,7 +43,7 @@ class ContextEntry:
             "entry_type": self.entry_type,
             "timestamp": self.timestamp,
             "importance": self.importance,
-            "tokens": self.tokens
+            "tokens": self.tokens,
         }
 
 
@@ -72,12 +72,12 @@ class HierarchicalContextManager:
     # Source authority scores - paper facts highest, debug lowest
     SOURCE_AUTHORITY = {
         "paper_analyzer": 1.0,  # Paper facts are highest authority
-        "user": 1.0,           # User input is authoritative
-        "reproduction": 0.9,   # Execution results are important
-        "discovery": 0.8,      # Repository discovery
+        "user": 1.0,  # User input is authoritative
+        "reproduction": 0.9,  # Execution results are important
+        "discovery": 0.8,  # Repository discovery
         "environment_setup": 0.7,
         "system": 0.5,
-        "debug": 0.3
+        "debug": 0.3,
     }
 
     # Type importance multipliers
@@ -86,7 +86,7 @@ class HierarchicalContextManager:
         "error": 0.9,
         "decision": 0.8,
         "observation": 0.6,
-        "debug": 0.3
+        "debug": 0.3,
     }
 
     def __init__(
@@ -95,7 +95,7 @@ class HierarchicalContextManager:
         hot_capacity: int = 30,
         max_tokens: int = 50000,
         embedding_model: str = "all-MiniLM-L6-v2",
-        collection_name: Optional[str] = None
+        collection_name: Optional[str] = None,
     ):
         """
         Initialize hierarchical context manager.
@@ -141,6 +141,7 @@ class HierarchicalContextManager:
         """Initialize tiktoken tokenizer."""
         try:
             import tiktoken
+
             try:
                 self.tokenizer = tiktoken.encoding_for_model(self.model_name)
             except KeyError:
@@ -156,10 +157,13 @@ class HierarchicalContextManager:
         if self._embedder is None:
             try:
                 from sentence_transformers import SentenceTransformer
+
                 self._embedder = SentenceTransformer(self.embedding_model_name)
                 logger.info(f"Loaded embedding model: {self.embedding_model_name}")
             except ImportError:
-                logger.warning("sentence-transformers not available, semantic search disabled")
+                logger.warning(
+                    "sentence-transformers not available, semantic search disabled"
+                )
                 self._embedder = False  # Mark as unavailable
         return self._embedder if self._embedder else None
 
@@ -169,10 +173,10 @@ class HierarchicalContextManager:
         if self._collection is None:
             try:
                 import chromadb
+
                 self._chroma_client = chromadb.Client()
                 self._collection = self._chroma_client.get_or_create_collection(
-                    name=self._collection_name,
-                    metadata={"hnsw:space": "cosine"}
+                    name=self._collection_name, metadata={"hnsw:space": "cosine"}
                 )
                 logger.info(f"ChromaDB collection initialized: {self._collection_name}")
             except ImportError:
@@ -205,7 +209,7 @@ class HierarchicalContextManager:
         content: str,
         source: str,
         entry_type: str = "observation",
-        importance: Optional[float] = None
+        importance: Optional[float] = None,
     ) -> str:
         """
         Add new context entry to storage.
@@ -249,7 +253,7 @@ class HierarchicalContextManager:
             entry_type=entry_type,
             importance=importance,
             tokens=tokens,
-            embedding=embedding
+            embedding=embedding,
         )
 
         # Add to hot storage
@@ -263,7 +267,7 @@ class HierarchicalContextManager:
                     ids=[entry_id],
                     embeddings=[embedding],
                     metadatas=[entry.to_dict()],
-                    documents=[content]
+                    documents=[content],
                 )
             except Exception as e:
                 logger.warning(f"Failed to add to vector store: {e}")
@@ -286,7 +290,7 @@ class HierarchicalContextManager:
         Keeps the most recent half of hot_capacity entries.
         Entries remain in warm storage for semantic retrieval.
         """
-        entries_to_remove = list(self.hot_context.keys())[:-self.hot_capacity // 2]
+        entries_to_remove = list(self.hot_context.keys())[: -self.hot_capacity // 2]
 
         removed_tokens = 0
         for entry_id in entries_to_remove:
@@ -318,7 +322,7 @@ class HierarchicalContextManager:
         self,
         entry: ContextEntry,
         query_embedding: Optional[List[float]],
-        semantic_score: float = 0.0
+        semantic_score: float = 0.0,
     ) -> float:
         """
         Calculate multi-factor relevance score.
@@ -343,14 +347,16 @@ class HierarchicalContextManager:
 
         # If we have embedding but no pre-computed score, calculate it
         if semantic_score == 0.0 and query_embedding and entry.embedding:
-            semantic_score = max(0.0, self._cosine_similarity(entry.embedding, query_embedding))
+            semantic_score = max(
+                0.0, self._cosine_similarity(entry.embedding, query_embedding)
+            )
 
         # Combined score
         score = (
-            self.WEIGHT_SEMANTIC * semantic_score +
-            self.WEIGHT_RECENCY * recency +
-            self.WEIGHT_IMPORTANCE * entry.importance +
-            self.WEIGHT_SOURCE_AUTHORITY * authority
+            self.WEIGHT_SEMANTIC * semantic_score
+            + self.WEIGHT_RECENCY * recency
+            + self.WEIGHT_IMPORTANCE * entry.importance
+            + self.WEIGHT_SOURCE_AUTHORITY * authority
         )
 
         return score
@@ -360,7 +366,7 @@ class HierarchicalContextManager:
         query: str,
         max_tokens: Optional[int] = None,
         include_cold: bool = True,
-        min_relevance: float = 0.0
+        min_relevance: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant context using multi-factor scoring.
@@ -399,17 +405,23 @@ class HierarchicalContextManager:
 
             semantic_score = 0.0
             if query_embedding and entry.embedding:
-                semantic_score = max(0.0, self._cosine_similarity(entry.embedding, query_embedding))
+                semantic_score = max(
+                    0.0, self._cosine_similarity(entry.embedding, query_embedding)
+                )
 
-            relevance = self._calculate_relevance(entry, query_embedding, semantic_score)
+            relevance = self._calculate_relevance(
+                entry, query_embedding, semantic_score
+            )
 
             if relevance >= min_relevance:
-                scored_entries.append({
-                    "entry": entry,
-                    "relevance": relevance,
-                    "semantic_score": semantic_score,
-                    "storage": "hot"
-                })
+                scored_entries.append(
+                    {
+                        "entry": entry,
+                        "relevance": relevance,
+                        "semantic_score": semantic_score,
+                        "storage": "hot",
+                    }
+                )
 
         # Query warm storage (vector search)
         if self.collection and query_embedding:
@@ -419,7 +431,7 @@ class HierarchicalContextManager:
                     warm_results = self.collection.query(
                         query_embeddings=[query_embedding],
                         n_results=min(50, warm_count),
-                        include=["metadatas", "documents", "distances"]
+                        include=["metadatas", "documents", "distances"],
                     )
 
                     # Process warm results
@@ -441,20 +453,26 @@ class HierarchicalContextManager:
                                 entry_type=metadata.get("entry_type", "observation"),
                                 timestamp=metadata.get("timestamp", 0),
                                 importance=metadata.get("importance", 0.5),
-                                tokens=metadata.get("tokens", self.count_tokens(content))
+                                tokens=metadata.get(
+                                    "tokens", self.count_tokens(content)
+                                ),
                             )
 
                             # ChromaDB returns distance, convert to similarity
                             semantic_score = max(0.0, 1 - distance)
-                            relevance = self._calculate_relevance(entry, query_embedding, semantic_score)
+                            relevance = self._calculate_relevance(
+                                entry, query_embedding, semantic_score
+                            )
 
                             if relevance >= min_relevance:
-                                scored_entries.append({
-                                    "entry": entry,
-                                    "relevance": relevance,
-                                    "semantic_score": semantic_score,
-                                    "storage": "warm"
-                                })
+                                scored_entries.append(
+                                    {
+                                        "entry": entry,
+                                        "relevance": relevance,
+                                        "semantic_score": semantic_score,
+                                        "storage": "warm",
+                                    }
+                                )
             except Exception as e:
                 logger.warning(f"Warm storage query failed: {e}")
 
@@ -473,14 +491,16 @@ class HierarchicalContextManager:
             summary_tokens = self.count_tokens(summary_text)
 
             if summary_tokens < max_tokens:
-                selected.append({
-                    "content": f"[Historical Summary]\n{summary_text}",
-                    "relevance": 0.5,  # Moderate relevance
-                    "source": "cold_summary",
-                    "type": "summary",
-                    "storage": "cold",
-                    "tokens": summary_tokens
-                })
+                selected.append(
+                    {
+                        "content": f"[Historical Summary]\n{summary_text}",
+                        "relevance": 0.5,  # Moderate relevance
+                        "source": "cold_summary",
+                        "type": "summary",
+                        "storage": "cold",
+                        "tokens": summary_tokens,
+                    }
+                )
                 total_tokens += summary_tokens
 
         # Add scored entries within budget
@@ -490,15 +510,17 @@ class HierarchicalContextManager:
             if total_tokens + entry.tokens > max_tokens:
                 continue
 
-            selected.append({
-                "content": entry.content,
-                "relevance": item["relevance"],
-                "semantic_score": item.get("semantic_score", 0.0),
-                "source": entry.source,
-                "type": entry.entry_type,
-                "storage": item["storage"],
-                "tokens": entry.tokens
-            })
+            selected.append(
+                {
+                    "content": entry.content,
+                    "relevance": item["relevance"],
+                    "semantic_score": item.get("semantic_score", 0.0),
+                    "source": entry.source,
+                    "type": entry.entry_type,
+                    "storage": item["storage"],
+                    "tokens": entry.tokens,
+                }
+            )
             total_tokens += entry.tokens
 
         logger.debug(
@@ -509,10 +531,7 @@ class HierarchicalContextManager:
         return selected
 
     def compile_context(
-        self,
-        query: str,
-        system_prompt: str = "",
-        max_tokens: Optional[int] = None
+        self, query: str, system_prompt: str = "", max_tokens: Optional[int] = None
     ) -> str:
         """
         Compile final context string for LLM consumption.
@@ -571,9 +590,7 @@ class HierarchicalContextManager:
         return compiled
 
     def create_cold_summary(
-        self,
-        summarize_fn: Callable[[str], str],
-        max_entries: int = 20
+        self, summarize_fn: Callable[[str], str], max_entries: int = 20
     ) -> str:
         """
         Create summary of warm storage and add to cold storage.
@@ -594,8 +611,7 @@ class HierarchicalContextManager:
         try:
             # Get entries from warm storage
             all_entries = self.collection.get(
-                include=["documents", "metadatas"],
-                limit=max_entries
+                include=["documents", "metadatas"], limit=max_entries
             )
 
             if not all_entries["documents"]:
@@ -615,7 +631,9 @@ class HierarchicalContextManager:
 
             if summary:
                 self.cold_summaries.append(summary)
-                logger.info(f"Created cold summary: {self.count_tokens(summary)} tokens")
+                logger.info(
+                    f"Created cold summary: {self.count_tokens(summary)} tokens"
+                )
 
             return summary
 
@@ -667,7 +685,7 @@ class HierarchicalContextManager:
             "max_tokens": self.max_tokens,
             "hot_capacity": self.hot_capacity,
             "embedder_available": self.embedder is not None,
-            "vector_store_available": self.collection is not None
+            "vector_store_available": self.collection is not None,
         }
 
     def __repr__(self) -> str:

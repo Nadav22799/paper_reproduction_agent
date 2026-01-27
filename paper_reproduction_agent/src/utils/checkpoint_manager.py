@@ -5,7 +5,6 @@ preventing loss of work when long experiments timeout or crash.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -65,8 +64,9 @@ class ExperimentCheckpoint:
         content = f"{repo_path}_{paper_id}".encode()
         return hashlib.md5(content).hexdigest()[:12]
 
-    def save(self, state: Dict[str, Any], phase: str, repo_path: str,
-             paper_id: str = "") -> bool:
+    def save(
+        self, state: Dict[str, Any], phase: str, repo_path: str, paper_id: str = ""
+    ) -> bool:
         """Save checkpoint for current phase.
 
         Args:
@@ -88,12 +88,12 @@ class ExperimentCheckpoint:
                 "repo_path": repo_path,
                 "paper_id": paper_id,
                 "state": state,
-                "experiment_id": experiment_id
+                "experiment_id": experiment_id,
             }
 
             # Write to temporary file first, then rename (atomic operation)
-            temp_path = checkpoint_path.with_suffix('.tmp')
-            with open(temp_path, 'w', encoding='utf-8') as f:
+            temp_path = checkpoint_path.with_suffix(".tmp")
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint_data, f, indent=2)
 
             temp_path.rename(checkpoint_path)
@@ -104,7 +104,9 @@ class ExperimentCheckpoint:
 
             print(f"💾 Checkpoint saved: {phase}")
             print(f"   File: {checkpoint_path.name} ({size_kb:.1f} KB)")
-            print(f"   Completed phases: {', '.join(completed_phases) if completed_phases else 'none'}")
+            print(
+                f"   Completed phases: {', '.join(completed_phases) if completed_phases else 'none'}"
+            )
             return True
 
         except Exception as e:
@@ -128,15 +130,17 @@ class ExperimentCheckpoint:
             checkpoints = []
             for checkpoint_file in self.checkpoint_dir.glob(f"{experiment_id}_*.json"):
                 try:
-                    with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                    with open(checkpoint_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     checkpoints.append((checkpoint_file, data))
-                except:
+                except Exception:
                     continue
 
             # If no exact match, try flexible search by paper_id
             if not checkpoints and paper_id:
-                print(f"📋 No exact match for {experiment_id}, searching by paper ID...")
+                print(
+                    f"📋 No exact match for {experiment_id}, searching by paper ID..."
+                )
                 checkpoints = self._search_by_paper_id(paper_id)
 
             if not checkpoints:
@@ -144,7 +148,7 @@ class ExperimentCheckpoint:
                 return None
 
             # Get most recent checkpoint
-            latest_checkpoint = max(checkpoints, key=lambda x: x[1]['timestamp'])
+            latest_checkpoint = max(checkpoints, key=lambda x: x[1]["timestamp"])
             checkpoint_path, checkpoint_data = latest_checkpoint
 
             print(f"📂 Resuming from checkpoint: {checkpoint_data['phase']}")
@@ -176,11 +180,13 @@ class ExperimentCheckpoint:
 
         for checkpoint_file in self.checkpoint_dir.glob("*.json"):
             try:
-                with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                with open(checkpoint_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
                 # Check if this checkpoint matches the paper
-                checkpoint_paper_id = data.get("paper_id", "").replace("arxiv:", "").strip()
+                checkpoint_paper_id = (
+                    data.get("paper_id", "").replace("arxiv:", "").strip()
+                )
 
                 if checkpoint_paper_id == normalized_paper_id:
                     checkpoints.append((checkpoint_file, data))
@@ -188,7 +194,9 @@ class ExperimentCheckpoint:
 
                 # Also check in state
                 state = data.get("state", {})
-                state_paper_id = state.get("paper_input", "").replace("arxiv:", "").strip()
+                state_paper_id = (
+                    state.get("paper_input", "").replace("arxiv:", "").strip()
+                )
 
                 if state_paper_id == normalized_paper_id:
                     checkpoints.append((checkpoint_file, data))
@@ -201,11 +209,13 @@ class ExperimentCheckpoint:
                 if arxiv_id == normalized_paper_id:
                     checkpoints.append((checkpoint_file, data))
 
-            except Exception as e:
+            except Exception:
                 continue
 
         if checkpoints:
-            print(f"   ✅ Found {len(checkpoints)} checkpoint(s) matching paper {paper_id}")
+            print(
+                f"   ✅ Found {len(checkpoints)} checkpoint(s) matching paper {paper_id}"
+            )
 
         return checkpoints
 
@@ -225,10 +235,10 @@ class ExperimentCheckpoint:
             phases = []
             for checkpoint_file in self.checkpoint_dir.glob(f"{experiment_id}_*.json"):
                 try:
-                    with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                    with open(checkpoint_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    phases.append(data['phase'])
-                except:
+                    phases.append(data["phase"])
+                except Exception:
                     continue
 
             return sorted(phases)
@@ -256,7 +266,9 @@ class ExperimentCheckpoint:
                 count += 1
 
             if count > 0:
-                print(f"🗑️  Cleared {count} checkpoint(s) for experiment {experiment_id}")
+                print(
+                    f"🗑️  Cleared {count} checkpoint(s) for experiment {experiment_id}"
+                )
 
             return True
 
@@ -296,17 +308,24 @@ def create_checkpoint_aware_wrapper(func):
             # Your experiment code here
             return result
     """
-    def wrapper(state, checkpoint_manager: ExperimentCheckpoint,
-                phase_name: str, repo_path: str, paper_id: str = "",
-                *args, **kwargs):
+
+    def wrapper(
+        state,
+        checkpoint_manager: ExperimentCheckpoint,
+        phase_name: str,
+        repo_path: str,
+        paper_id: str = "",
+        *args,
+        **kwargs,
+    ):
 
         # Try to resume from checkpoint
         checkpoint_data = checkpoint_manager.resume(repo_path, paper_id)
 
-        if checkpoint_data and checkpoint_data['phase'] == phase_name:
+        if checkpoint_data and checkpoint_data["phase"] == phase_name:
             print(f"♻️  Resuming {phase_name} from checkpoint")
             # Merge checkpoint state with current state
-            state.update(checkpoint_data['state'])
+            state.update(checkpoint_data["state"])
             return state
 
         # Run the function
@@ -315,10 +334,7 @@ def create_checkpoint_aware_wrapper(func):
         # Save checkpoint after completion
         if result:
             checkpoint_manager.save(
-                state=result,
-                phase=phase_name,
-                repo_path=repo_path,
-                paper_id=paper_id
+                state=result, phase=phase_name, repo_path=repo_path, paper_id=paper_id
             )
 
         return result

@@ -3,10 +3,11 @@
 import re
 import glob
 import requests
-from typing import Dict, List, Optional
+from typing import Dict, List
 from pathlib import Path
 from datetime import datetime
 from .unified_paper_analyzer import UnifiedPaperAnalyzer
+
 
 class DiscoveryAgent:
     """Agent that handles repository discovery, selection, and validation."""
@@ -15,17 +16,23 @@ class DiscoveryAgent:
         self.llm = llm
         self.metrics_tracker = metrics_tracker
 
-    def find_best_implementation(self, paper_title: str, paper_abstract: str = "", arxiv_id: str = None, 
-                               authors: list = None, existing_repos: list = None) -> Dict:
+    def find_best_implementation(
+        self,
+        paper_title: str,
+        paper_abstract: str = "",
+        arxiv_id: str = None,
+        authors: list = None,
+        existing_repos: list = None,
+    ) -> Dict:
         """Find the best implementation for a paper.
-        
+
         Args:
             paper_title: Title of the paper
             paper_abstract: Abstract of the paper
             arxiv_id: Optional arXiv ID
             authors: Optional list of authors
             existing_repos: Optional list of repos already found (e.g. from paper text)
-            
+
         Returns:
             Dict containing:
             - repo_url: The selected repository URL
@@ -34,15 +41,17 @@ class DiscoveryAgent:
             - all_candidates: List of all candidate repos found
         """
         all_candidates = existing_repos or []
-        repo_metadata = [] # List of dicts {url, match_file, ...}
-        
+        repo_metadata = []  # List of dicts {url, match_file, ...}
+
         # 1. Try Papers with Code if no repos found or just to augment
         pwc_repos = self._search_papers_with_code(paper_title)
         if pwc_repos:
             all_candidates.extend(pwc_repos)
             for repo in pwc_repos:
-                repo_metadata.append({"url": repo, "match_file": "PapersWithCode", "confidence": "high"})
-                
+                repo_metadata.append(
+                    {"url": repo, "match_file": "PapersWithCode", "confidence": "high"}
+                )
+
         # 2. Enhanced Discovery (GitHub Search) if we still struggle
         if not all_candidates and (arxiv_id or paper_title):
             enhanced_repos = self._enhanced_discovery(arxiv_id, paper_title, authors)
@@ -50,20 +59,22 @@ class DiscoveryAgent:
                 for repo in enhanced_repos:
                     all_candidates.append(repo["url"])
                     repo_metadata.append(repo)
-                    
+
         # Deduplicate
         all_candidates = list(set(all_candidates))
-        
+
         if not all_candidates:
             return {"repo_url": None, "confidence": "none", "all_candidates": []}
-            
+
         # 3. Select the best one
-        best_repo = self._select_best_repo(all_candidates, paper_title, paper_abstract, repo_metadata)
-        
+        best_repo = self._select_best_repo(
+            all_candidates, paper_title, paper_abstract, repo_metadata
+        )
+
         return {
             "repo_url": best_repo,
-            "confidence": "high" if best_repo else "low", # simplified confidence
-            "all_candidates": all_candidates
+            "confidence": "high" if best_repo else "low",  # simplified confidence
+            "all_candidates": all_candidates,
         }
 
     def check_existing_results(self, repo_path: str) -> dict:
@@ -86,7 +97,7 @@ class DiscoveryAgent:
             "result_files": [],
             "checkpoints": [],
             "log_files": [],
-            "recently_modified": []
+            "recently_modified": [],
         }
 
         repo = Path(repo_path)
@@ -95,12 +106,20 @@ class DiscoveryAgent:
 
         # Check for result files (JSON, CSV with results/metrics in name)
         result_patterns = [
-            "**/results*.json", "**/eval_results*.json", "**/metrics*.json",
-            "**/results*.csv", "**/metrics*.csv",
-            "**/all_results.json", "**/trainer_state.json",
-            "results/**/*.json", "results/**/*.csv", "results/**/*.txt",
-            "outputs/**/*.json", "outputs/**/*.csv",
-            "output/**/*.json", "output/**/*.csv",
+            "**/results*.json",
+            "**/eval_results*.json",
+            "**/metrics*.json",
+            "**/results*.csv",
+            "**/metrics*.csv",
+            "**/all_results.json",
+            "**/trainer_state.json",
+            "results/**/*.json",
+            "results/**/*.csv",
+            "results/**/*.txt",
+            "outputs/**/*.json",
+            "outputs/**/*.csv",
+            "output/**/*.json",
+            "output/**/*.csv",
         ]
 
         for pattern in result_patterns:
@@ -117,9 +136,13 @@ class DiscoveryAgent:
 
         # Check for model checkpoints
         checkpoint_patterns = [
-            "**/checkpoint-*", "**/checkpoint_*",
-            "**/*.pt", "**/*.pth", "**/*.ckpt",
-            "**/pytorch_model.bin", "**/model.safetensors",
+            "**/checkpoint-*",
+            "**/checkpoint_*",
+            "**/*.pt",
+            "**/*.pth",
+            "**/*.ckpt",
+            "**/pytorch_model.bin",
+            "**/model.safetensors",
         ]
 
         for pattern in checkpoint_patterns:
@@ -157,9 +180,15 @@ class DiscoveryAgent:
                     if stat.st_mtime > recent_cutoff and stat.st_size > 100:
                         rel_path = str(path.relative_to(repo))
                         # Skip common non-result files
-                        if not any(skip in rel_path.lower() for skip in [
-                            'node_modules', '.git', '__pycache__', 'package'
-                        ]):
+                        if not any(
+                            skip in rel_path.lower()
+                            for skip in [
+                                "node_modules",
+                                ".git",
+                                "__pycache__",
+                                "package",
+                            ]
+                        ):
                             result["recently_modified"].append(rel_path)
                 except:
                     pass
@@ -167,8 +196,10 @@ class DiscoveryAgent:
         # Determine if we have usable results
         # Criteria: At least one result file OR (checkpoint + log file)
         has_result_files = len(result["result_files"]) > 0
-        has_checkpoints_and_logs = len(result["checkpoints"]) > 0 and len(result["log_files"]) > 0
-        has_recent_results = len(result["recently_modified"]) > 0
+        has_checkpoints_and_logs = (
+            len(result["checkpoints"]) > 0 and len(result["log_files"]) > 0
+        )
+        len(result["recently_modified"]) > 0
 
         result["has_results"] = has_result_files or has_checkpoints_and_logs
 
@@ -201,19 +232,31 @@ class DiscoveryAgent:
                         impl_data = impl_response.json()
                         implementations = impl_data.get("results", [])
 
-                        repos = [impl["url"] for impl in implementations if impl.get("url") and impl.get("is_official")]
+                        repos = [
+                            impl["url"]
+                            for impl in implementations
+                            if impl.get("url") and impl.get("is_official")
+                        ]
                         if not repos:
-                            repos = [impl["url"] for impl in implementations if impl.get("url")]
+                            repos = [
+                                impl["url"]
+                                for impl in implementations
+                                if impl.get("url")
+                            ]
 
                         if repos:
-                            print(f"✅ Found {len(repos)} implementation(s) from Papers with Code")
+                            print(
+                                f"✅ Found {len(repos)} implementation(s) from Papers with Code"
+                            )
                             return repos
         except Exception as e:
             print(f"⚠️  Papers with Code API failed: {str(e)[:50]}")
-        
+
         return []
 
-    def _enhanced_discovery(self, arxiv_id: str, paper_title: str, authors: list) -> List[Dict]:
+    def _enhanced_discovery(
+        self, arxiv_id: str, paper_title: str, authors: list
+    ) -> List[Dict]:
         """Try enhanced repo discovery methods (GitHub arXiv search + web search)."""
         print("🔎 Trying enhanced repository discovery...")
 
@@ -226,35 +269,37 @@ class DiscoveryAgent:
             if not self.llm:
                 print("   ⚠️  LLM not initialized, skipping enhanced discovery")
                 return []
-                
-            analyzer = UnifiedPaperAnalyzer(self.llm, metrics_tracker=self.metrics_tracker)
+
+            analyzer = UnifiedPaperAnalyzer(
+                self.llm, metrics_tracker=self.metrics_tracker
+            )
             discovered_repos = analyzer.enhanced_repo_discovery(
-                arxiv_id=arxiv_id,
-                paper_title=paper_title,
-                authors=authors
+                arxiv_id=arxiv_id, paper_title=paper_title, authors=authors
             )
 
             if discovered_repos:
-                print(f"✅ Enhanced discovery found {len(discovered_repos)} implementation(s)")
+                print(
+                    f"✅ Enhanced discovery found {len(discovered_repos)} implementation(s)"
+                )
                 return discovered_repos
         except Exception as e:
             print(f"⚠️  Enhanced discovery failed: {str(e)[:50]}")
-            
+
         return []
 
     def _extract_response_text(self, response) -> str:
         """Extract text content from LLM response (handles various formats)."""
-        if hasattr(response, 'content'):
+        if hasattr(response, "content"):
             if isinstance(response.content, list):
                 parts = []
                 for item in response.content:
-                    if isinstance(item, dict) and 'text' in item:
-                        parts.append(item['text'])
+                    if isinstance(item, dict) and "text" in item:
+                        parts.append(item["text"])
                     elif isinstance(item, str):
                         parts.append(item)
-                    elif hasattr(item, 'text'):
+                    elif hasattr(item, "text"):
                         parts.append(item.text)
-                return ''.join(parts)
+                return "".join(parts)
             else:
                 return str(response.content)
         return str(response)
@@ -269,20 +314,52 @@ class DiscoveryAgent:
         """
         # Try to find capitalized method names (DreamerV3, GPT-4, BERT, etc.)
         # Match patterns like: DreamerV3, GPT-4, BERT, RoBERTa, T5, etc.
-        acronyms = re.findall(r'\b([A-Z][A-Za-z0-9\-]*(?:[Vv]\d+)?)\b', paper_title)
+        acronyms = re.findall(r"\b([A-Z][A-Za-z0-9\-]*(?:[Vv]\d+)?)\b", paper_title)
         if acronyms:
             # Filter out common words that aren't method names
-            common = {'The', 'A', 'An', 'In', 'On', 'For', 'With', 'And', 'Or', 'Is', 'Are',
-                      'We', 'Our', 'This', 'That', 'From', 'To', 'By', 'As', 'At', 'It',
-                      'Learning', 'Training', 'Using', 'Through', 'Toward', 'Towards',
-                      'Model', 'Models', 'Method', 'Methods', 'Paper', 'Report', 'Technical'}
+            common = {
+                "The",
+                "A",
+                "An",
+                "In",
+                "On",
+                "For",
+                "With",
+                "And",
+                "Or",
+                "Is",
+                "Are",
+                "We",
+                "Our",
+                "This",
+                "That",
+                "From",
+                "To",
+                "By",
+                "As",
+                "At",
+                "It",
+                "Learning",
+                "Training",
+                "Using",
+                "Through",
+                "Toward",
+                "Towards",
+                "Model",
+                "Models",
+                "Method",
+                "Methods",
+                "Paper",
+                "Report",
+                "Technical",
+            }
             filtered = [a for a in acronyms if a not in common and len(a) > 1]
             if filtered:
                 return filtered[0]
 
         # Try text before colon (often the method name)
-        if ':' in paper_title:
-            before_colon = paper_title.split(':')[0].strip()
+        if ":" in paper_title:
+            before_colon = paper_title.split(":")[0].strip()
             # Only use if it's short (likely a method name, not a full sentence)
             if len(before_colon.split()) <= 3:
                 return before_colon
@@ -300,26 +377,36 @@ class DiscoveryAgent:
             return int(cleaned)
 
         # Strategy 2: Regex for standalone number
-        match = re.search(r'\b(\d+)\b', cleaned)
+        match = re.search(r"\b(\d+)\b", cleaned)
         if match:
             return int(match.group(1))
 
         # Strategy 3: Handle "Option X", "Repository X", "#X" patterns
-        match = re.search(r'(?:option|repository|repo|choice|number|#)\s*[:\-]?\s*(\d+)', cleaned, re.IGNORECASE)
+        match = re.search(
+            r"(?:option|repository|repo|choice|number|#)\s*[:\-]?\s*(\d+)",
+            cleaned,
+            re.IGNORECASE,
+        )
         if match:
             return int(match.group(1))
 
         # Strategy 4: Number at the very start or end
-        match = re.match(r'^(\d+)', cleaned)
+        match = re.match(r"^(\d+)", cleaned)
         if match:
             return int(match.group(1))
-        match = re.search(r'(\d+)$', cleaned)
+        match = re.search(r"(\d+)$", cleaned)
         if match:
             return int(match.group(1))
 
         return None
 
-    def _select_best_repo(self, repos: list, paper_title: str, paper_abstract: str = "", repo_metadata: list = None) -> str:
+    def _select_best_repo(
+        self,
+        repos: list,
+        paper_title: str,
+        paper_abstract: str = "",
+        repo_metadata: list = None,
+    ) -> str:
         """Use LLM to select the best repository for the paper."""
         if len(repos) == 1:
             return repos[0]
@@ -340,7 +427,9 @@ class DiscoveryAgent:
                         stars = meta.get("stars", 0)
                         if match_file:
                             if match_file == "README.md":
-                                line += " (arXiv cited in main README.md - STRONG signal)"
+                                line += (
+                                    " (arXiv cited in main README.md - STRONG signal)"
+                                )
                             elif "example" in match_file.lower():
                                 line += f" (arXiv cited in {match_file} - may be example usage, not official repo)"
                             else:
@@ -377,8 +466,17 @@ Answer (number only):"""
         try:
             # Setup callback for token tracking
             from ..utils.logging_callback import LoggingCallbackHandler
-            callbacks = [LoggingCallbackHandler(verbose=True, metrics_tracker=self.metrics_tracker)] if self.metrics_tracker else []
-            
+
+            callbacks = (
+                [
+                    LoggingCallbackHandler(
+                        verbose=True, metrics_tracker=self.metrics_tracker
+                    )
+                ]
+                if self.metrics_tracker
+                else []
+            )
+
             response = self.llm.invoke(prompt, config={"callbacks": callbacks})
             response_text = self._extract_response_text(response)
 
@@ -391,7 +489,9 @@ Answer (number only):"""
                     print(f"🤖 LLM selected repo #{selected_idx}: {repos[idx]}")
                     return repos[idx]
                 else:
-                    print(f"⚠️  LLM returned invalid index {selected_idx} (out of range 1-{len(repos)})")
+                    print(
+                        f"⚠️  LLM returned invalid index {selected_idx} (out of range 1-{len(repos)})"
+                    )
                     selected_idx = None
             else:
                 print(f"⚠️  LLM response couldn't be parsed: '{response_text[:80]}'")
@@ -417,19 +517,25 @@ Reply with ONLY a single digit (1, 2, 3, etc.). Nothing else."""
                 if selected_idx is not None:
                     idx = selected_idx - 1
                     if 0 <= idx < len(repos):
-                        print(f"✅ Retry successful, LLM selected repo #{selected_idx}: {repos[idx]}")
+                        print(
+                            f"✅ Retry successful, LLM selected repo #{selected_idx}: {repos[idx]}"
+                        )
                         return repos[idx]
                     else:
                         print(f"⚠️  Retry returned invalid index {selected_idx}")
                 else:
-                    print(f"⚠️  Retry response also couldn't be parsed: '{retry_text[:50]}'")
+                    print(
+                        f"⚠️  Retry response also couldn't be parsed: '{retry_text[:50]}'"
+                    )
             except Exception as e:
                 print(f"⚠️  Retry also failed: {e}")
 
         # Fall back to heuristic selection
         return self._heuristic_select_repo(repos, paper_title, repo_metadata)
 
-    def _heuristic_select_repo(self, repos: list, paper_title: str, repo_metadata: list = None) -> str:
+    def _heuristic_select_repo(
+        self, repos: list, paper_title: str, repo_metadata: list = None
+    ) -> str:
         """Select repository using heuristic scoring when LLM fails.
 
         Scoring factors:
@@ -451,10 +557,10 @@ Reply with ONLY a single digit (1, 2, 3, etc.). Nothing else."""
 
         for repo in repos:
             score = 0
-            repo_lower = repo.lower()
+            repo.lower()
 
             # Extract repo name from URL
-            repo_name = repo.split('/')[-1] if '/' in repo else repo
+            repo_name = repo.split("/")[-1] if "/" in repo else repo
             repo_name_lower = repo_name.lower()
 
             # Get metadata for this repo
@@ -485,8 +591,8 @@ Reply with ONLY a single digit (1, 2, 3, etc.). Nothing else."""
 
             # --- METHOD NAME MATCHING (very strong signal) ---
             if paper_method:
-                method_lower = paper_method.lower().replace('-', '').replace('_', '')
-                repo_name_normalized = repo_name_lower.replace('-', '').replace('_', '')
+                method_lower = paper_method.lower().replace("-", "").replace("_", "")
+                repo_name_normalized = repo_name_lower.replace("-", "").replace("_", "")
 
                 # Exact match or close match
                 if method_lower == repo_name_normalized:
@@ -513,14 +619,32 @@ Reply with ONLY a single digit (1, 2, 3, etc.). Nothing else."""
 
             # --- PENALTIES ---
             # Penalize generic library names
-            generic_names = ['pytorch', 'tensorflow', 'transformers', 'huggingface', 'examples', 'tutorials']
+            generic_names = [
+                "pytorch",
+                "tensorflow",
+                "transformers",
+                "huggingface",
+                "examples",
+                "tutorials",
+            ]
             for generic in generic_names:
                 if generic in repo_name_lower:
                     score -= 10
 
             # Penalize study guides, paper collections, etc.
-            collection_keywords = ['study', 'awesome', 'list', 'collection', 'survey', 'papers',
-                                   'reading', 'notes', 'resources', 'curated', 'deeplearning']
+            collection_keywords = [
+                "study",
+                "awesome",
+                "list",
+                "collection",
+                "survey",
+                "papers",
+                "reading",
+                "notes",
+                "resources",
+                "curated",
+                "deeplearning",
+            ]
             for kw in collection_keywords:
                 if kw in repo_name_lower:
                     score -= 20
@@ -533,6 +657,8 @@ Reply with ONLY a single digit (1, 2, 3, etc.). Nothing else."""
 
         # Print top 3 scores for debugging
         scores_debug.sort(key=lambda x: x[1], reverse=True)
-        print(f"   Top scores: {', '.join(f'{name}={s}' for name, s in scores_debug[:3])}")
+        print(
+            f"   Top scores: {', '.join(f'{name}={s}' for name, s in scores_debug[:3])}"
+        )
         print(f"🔍 Heuristic selected: {best_repo} (score: {best_score})")
         return best_repo

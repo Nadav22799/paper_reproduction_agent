@@ -10,7 +10,6 @@ with a unified approach that:
 
 import os
 from typing import Dict, List
-from pathlib import Path
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from ..tools.code_execution_tools import (
@@ -20,13 +19,13 @@ from ..tools.code_execution_tools import (
     execute_shell_command,
     execute_python_script,
     execute_python_code,  # NEW: Execute inline Python code
-    create_python_file,   # Create Python scripts
+    create_python_file,  # Create Python scripts
     check_python_compatibility,
     # smart_install_dependencies,  # REMOVED: Conflicts with README-first approach
     search_error_solution,
     start_background_process,  # NEW: For long-running experiments
-    wait_for_process,          # NEW: Smart blocking wait
-    stop_process,              # NEW: Cleanup
+    wait_for_process,  # NEW: Smart blocking wait
+    stop_process,  # NEW: Cleanup
 )
 from ..utils.llm_factory import create_llm
 from ..utils.logging_callback import LoggingCallbackHandler
@@ -34,7 +33,7 @@ from ..utils.message_utils import normalize_message_content
 from ..utils.resource_detector import (
     detect_system_resources,
     get_resource_summary,
-    get_experiment_strategy
+    get_experiment_strategy,
 )
 from ..utils.context_manager import ContextManager
 from ..utils.hierarchical_context import HierarchicalContextManager
@@ -43,32 +42,36 @@ from ..utils.hierarchical_context import HierarchicalContextManager
 class UnifiedReproductionAgent:
     """Agent that follows README instructions to reproduce paper results."""
 
-    def __init__(self, llm=None, max_iterations=50, hierarchical_context: HierarchicalContextManager = None, metrics_tracker=None):
+    def __init__(
+        self,
+        llm=None,
+        max_iterations=50,
+        hierarchical_context: HierarchicalContextManager = None,
+        metrics_tracker=None,
+    ):
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
 
         # Initialize token-based context manager to prevent context explosion
         self.context_manager = ContextManager(
-            max_tokens=50000,          # 50K token limit (accurate token counting)
-            sliding_window_size=3      # Keep last 3 tool interactions in detail
+            max_tokens=50000,  # 50K token limit (accurate token counting)
+            sliding_window_size=3,  # Keep last 3 tool interactions in detail
         )
 
         # Hierarchical context for semantic retrieval (shared or create new)
         self.hierarchical_context = hierarchical_context or HierarchicalContextManager(
-            model_name="gpt-4",
-            hot_capacity=30,
-            max_tokens=50000
+            model_name="gpt-4", hot_capacity=30, max_tokens=50000
         )
 
         # Detect system resources
         self.resources = detect_system_resources()
         self.experiment_strategy = get_experiment_strategy(self.resources)
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print(get_resource_summary(self.resources))
         print(f"   Experiment Strategy: {self.experiment_strategy.upper()}")
-        print("="*60)
+        print("=" * 60)
 
         self.system_prompt = """You are an Expert AI Engineer specializing in reproducing machine learning research papers. Your task is to follow repository instructions precisely to validate published results.
 
@@ -195,32 +198,34 @@ Maximum {max_iterations} tool calls. Be efficient.
             list_directory,
             # Execution
             execute_shell_command,
-            execute_python_code,      # PRIMARY: Write and run inline Python
-            create_python_file,       # Save reusable scripts
-            execute_python_script,    # Run saved scripts
+            execute_python_code,  # PRIMARY: Write and run inline Python
+            create_python_file,  # Save reusable scripts
+            execute_python_script,  # Run saved scripts
             # Setup utilities
             check_python_compatibility,
             # smart_install_dependencies,  # REMOVED: Use README instructions instead
-            search_error_solution,    # Gemini-powered error fixing
-            start_background_process, # Async training
-            wait_for_process,         # Smart blocking wait
-            stop_process,             # Process control
+            search_error_solution,  # Gemini-powered error fixing
+            start_background_process,  # Async training
+            wait_for_process,  # Smart blocking wait
+            stop_process,  # Process control
         ]
 
         # Use ReAct agent with native tool calling
         self.agent = create_react_agent(self.llm, tools=tools)
 
-    def _get_resource_aware_instructions(self, experiment_mode: str = "single", custom_experiments: List[str] = None) -> str:
+    def _get_resource_aware_instructions(
+        self, experiment_mode: str = "single", custom_experiments: List[str] = None
+    ) -> str:
         """Generate resource-aware experiment instructions."""
         strategy = self.experiment_strategy
-        
+
         # Override based on user selection
         if experiment_mode == "all":
             strategy = "all_experiments"
         elif experiment_mode == "custom":
             strategy = "custom"
         elif experiment_mode == "single":
-            # If user wants 1 experiment but we detected high resources, 
+            # If user wants 1 experiment but we detected high resources,
             # we should still restrict to main_experiment (single)
             strategy = "main_experiment"
 
@@ -268,15 +273,20 @@ Before running ANY experiment script (.sh or .py), you MUST:
 
         if strategy == "custom":
             exps = ", ".join(custom_experiments or ["specified by user"])
-            return common_instructions + f"""
+            return (
+                common_instructions
+                + f"""
 🎯 CUSTOM SELECTION - Run specific experiments:
 - You MUST run ONLY the following experiments: {exps}
 - Ignore other experiments mentioned in README unless required for your selection
 - Goal: Reproduce specific selected results
 """
+            )
 
         if strategy == "all_experiments":
-            return common_instructions + """
+            return (
+                common_instructions
+                + """
 🚀 HIGH RESOURCES - Run full experiments:
 - Execute full training/evaluation as specified in paper
 - Use full datasets (ImageNet, WMT, etc. are OK)
@@ -284,9 +294,12 @@ Before running ANY experiment script (.sh or .py), you MUST:
 - Multi-GPU / distributed training allowed (after adapting num_gpus!)
 - Goal: Complete reproduction of all results
 """
+            )
 
         elif strategy == "main_experiment":
-            return common_instructions + """
+            return (
+                common_instructions
+                + """
 ⚙️  MEDIUM RESOURCES - Run main experiment with limits:
 - Focus on PRIMARY experiment from paper
 - Use smaller dataset variants when available (CIFAR-10 instead of ImageNet)
@@ -295,9 +308,12 @@ Before running ANY experiment script (.sh or .py), you MUST:
 - Skip very expensive experiments
 - Goal: Reproduce core claim of paper
 """
+            )
 
         else:  # minimal_experiment
-            return common_instructions + """
+            return (
+                common_instructions
+                + """
 ⚠️  LOW RESOURCES - Run minimal validation:
 - Find SIMPLEST experiment that validates the idea
 - Use smallest dataset (MNIST, toy data)
@@ -307,6 +323,7 @@ Before running ANY experiment script (.sh or .py), you MUST:
 - NO large datasets (skip ImageNet, WMT, etc.)
 - Goal: Verify setup works and approach is sound
 """
+            )
 
     def _extract_experiment_names_from_readme(self, code_path: str) -> List[str]:
         """Extract experiment names/directories from README using LLM."""
@@ -315,7 +332,7 @@ Before running ANY experiment script (.sh or .py), you MUST:
             if not os.path.exists(readme_path):
                 return []
 
-            with open(readme_path, 'r', encoding='utf-8') as f:
+            with open(readme_path, "r", encoding="utf-8") as f:
                 readme_content = f.read()[:10000]  # First 10k chars
 
             prompt = f"""Analyze this README and extract ALL experiment names, benchmark names, or task names mentioned.
@@ -340,17 +357,23 @@ Experiment names (comma-separated):"""
                 content = " ".join([str(c) for c in content])
             elif not isinstance(content, str):
                 content = str(content)
-                
+
             result = content.strip()
 
             if result == "NONE" or not result:
                 return []
 
             # Parse comma-separated list
-            experiments = [exp.strip() for exp in result.split(',')]
+            experiments = [exp.strip() for exp in result.split(",")]
             # Clean up - remove "NONE", empty strings, and generic terms
-            experiments = [exp for exp in experiments if exp and exp.upper() != "NONE"
-                          and len(exp) > 1 and not exp.lower() in ['experiments', 'examples', 'tasks']]
+            experiments = [
+                exp
+                for exp in experiments
+                if exp
+                and exp.upper() != "NONE"
+                and len(exp) > 1
+                and exp.lower() not in ["experiments", "examples", "tasks"]
+            ]
 
             print(f"📋 Extracted experiments from README: {experiments}")
             return experiments
@@ -359,7 +382,13 @@ Experiment names (comma-separated):"""
             print(f"⚠️  Could not extract experiments from README: {e}")
             return []
 
-    def reproduce(self, code_path: str, paper_context: str = "", experiment_mode: str = "single", custom_experiments: List[str] = None) -> Dict:
+    def reproduce(
+        self,
+        code_path: str,
+        paper_context: str = "",
+        experiment_mode: str = "single",
+        custom_experiments: List[str] = None,
+    ) -> Dict:
         """
         Follow README instructions to reproduce paper results.
 
@@ -372,7 +401,9 @@ Experiment names (comma-separated):"""
         Returns:
             Reproduction results with setup status, data status, and experiment results
         """
-        resource_instructions = self._get_resource_aware_instructions(experiment_mode, custom_experiments)
+        resource_instructions = self._get_resource_aware_instructions(
+            experiment_mode, custom_experiments
+        )
 
         # Add context from paper if available
         paper_info = ""
@@ -392,7 +423,9 @@ Use this context to:
 """
 
         # Use replace() instead of format() to avoid conflicts with code example curly braces
-        formatted_prompt = self.system_prompt.replace("{max_iterations}", str(self.max_iterations)).replace("{resource_instructions}", resource_instructions)
+        formatted_prompt = self.system_prompt.replace(
+            "{max_iterations}", str(self.max_iterations)
+        ).replace("{resource_instructions}", resource_instructions)
         task = f"""{formatted_prompt}
 
 ═══════════════════════════════════════════════════════════════
@@ -449,22 +482,24 @@ Remember:
 """
 
         messages = [HumanMessage(content=task)]
-        callback = LoggingCallbackHandler(verbose=True, metrics_tracker=self.metrics_tracker)
+        callback = LoggingCallbackHandler(
+            verbose=True, metrics_tracker=self.metrics_tracker
+        )
 
         try:
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("🚀 STARTING UNIFIED REPRODUCTION WORKFLOW")
-            print("="*60)
+            print("=" * 60)
 
             # Use custom agent loop with context management
             result = self._run_agent_with_context_management(
-                messages=messages,
-                callback=callback
+                messages=messages, callback=callback
             )
 
         except Exception as e:
             print(f"\n❌ Unified reproduction failed: {e}")
             import traceback
+
             traceback.print_exc()
             result = {"messages": [], "error": str(e)}
 
@@ -489,15 +524,18 @@ Remember:
 
         try:
             for batch in range(max_batches):
-                print(f"\n📦 Batch {batch + 1}/{max_batches} (iterations {batch*batch_size + 1}-{(batch+1)*batch_size})")
+                print(
+                    f"\n📦 Batch {batch + 1}/{max_batches} (iterations {batch*batch_size + 1}-{(batch+1)*batch_size})"
+                )
 
                 # Run agent for this batch
                 result = self.agent.invoke(
                     {"messages": current_messages},
                     config={
-                        "recursion_limit": batch_size * 4,  # Increased to 4x (now 60 instead of 30)
-                        "callbacks": [callback]
-                    }
+                        "recursion_limit": batch_size
+                        * 4,  # Increased to 4x (now 60 instead of 30)
+                        "callbacks": [callback],
+                    },
                 )
 
                 # Check if agent finished
@@ -509,33 +547,35 @@ Remember:
                 # Check if agent is done (no more tool calls)
                 last_msg = result_messages[-1] if result_messages else None
                 has_tool_calls = (
-                    hasattr(last_msg, 'tool_calls') and
-                    last_msg.tool_calls and
-                    len(last_msg.tool_calls) > 0
+                    hasattr(last_msg, "tool_calls")
+                    and last_msg.tool_calls
+                    and len(last_msg.tool_calls) > 0
                 )
-                
+
                 # Handling empty/malformed responses from LLM which cause premature exit
                 if not has_tool_calls and last_msg:
-                    last_content = str(getattr(last_msg, 'content', '')).strip()
-                    
+                    last_content = str(getattr(last_msg, "content", "")).strip()
+
                     # If content is empty or extremely short without tool calls, it's likely an error/confusion
                     if not last_content or len(last_content) < 5:
-                        print("   ⚠️ LLM returned empty/short response without tool calls - prompting to continue...")
+                        print(
+                            "   ⚠️ LLM returned empty/short response without tool calls - prompting to continue..."
+                        )
                         from langchain_core.messages import HumanMessage
-                        
+
                         # Inspect recent history to provide better guidance
                         prev_tool_output = ""
                         if len(result_messages) >= 2:
                             prev_msg = result_messages[-2]
-                            if hasattr(prev_msg, 'content'):
+                            if hasattr(prev_msg, "content"):
                                 prev_tool_output = str(prev_msg.content)
-                        
+
                         hint = "You returned an empty message. "
                         if "PID" in prev_tool_output and "success" in prev_tool_output:
                             hint += "You just started a background process. You MUST now call wait_for_process(pid=...) to wait for it to finish."
                         else:
                             hint += "Please continue with the reproduction task using appropriate tools."
-                            
+
                         continue_msg = HumanMessage(content=hint)
                         result_messages.append(continue_msg)
                         current_messages = result_messages
@@ -543,15 +583,30 @@ Remember:
 
                 if not has_tool_calls:
                     # Check if LLM described a plan but didn't execute it
-                    last_content = str(getattr(last_msg, 'content', ''))
-                    planning_indicators = ['i will', 'let me', 'i\'ll', 'next step', 'going to', 'proceed with']
-                    has_plan = any(indicator in last_content.lower() for indicator in planning_indicators)
+                    last_content = str(getattr(last_msg, "content", ""))
+                    planning_indicators = [
+                        "i will",
+                        "let me",
+                        "i'll",
+                        "next step",
+                        "going to",
+                        "proceed with",
+                    ]
+                    has_plan = any(
+                        indicator in last_content.lower()
+                        for indicator in planning_indicators
+                    )
 
                     if has_plan and len(last_content) > 100:
                         # LLM made a plan but didn't execute - prompt it to continue
-                        print("   ⚠️ LLM described plan but didn't execute - prompting to continue...")
+                        print(
+                            "   ⚠️ LLM described plan but didn't execute - prompting to continue..."
+                        )
                         from langchain_core.messages import HumanMessage
-                        continue_msg = HumanMessage(content="Please execute the plan you described. Use the appropriate tools to carry out the actions.")
+
+                        continue_msg = HumanMessage(
+                            content="Please execute the plan you described. Use the appropriate tools to carry out the actions."
+                        )
                         result_messages.append(continue_msg)
                         current_messages = result_messages
                         continue
@@ -563,28 +618,42 @@ Remember:
                 if len(result_messages) > 10:
                     original_count = len(result_messages)
                     original_tokens = sum(
-                        self.context_manager.count_tokens(str(getattr(m, 'content', '')))
+                        self.context_manager.count_tokens(
+                            str(getattr(m, "content", ""))
+                        )
                         for m in result_messages
                     )
 
                     # Prune messages
-                    pruned_messages = self.context_manager.prune_messages(result_messages)
+                    pruned_messages = self.context_manager.prune_messages(
+                        result_messages
+                    )
 
                     pruned_count = len(pruned_messages)
                     pruned_tokens = sum(
-                        self.context_manager.count_tokens(str(getattr(m, 'content', '')))
+                        self.context_manager.count_tokens(
+                            str(getattr(m, "content", ""))
+                        )
                         for m in pruned_messages
                     )
 
-                    print(f"\n   📊 Context Pruning:")
-                    print(f"      Messages: {original_count} → {pruned_count} ({pruned_count/original_count*100:.1f}% kept)")
-                    print(f"      Tokens: {original_tokens:,} → {pruned_tokens:,} ({pruned_tokens/max(1, original_tokens)*100:.1f}% kept)")
+                    print("\n   📊 Context Pruning:")
+                    print(
+                        f"      Messages: {original_count} → {pruned_count} ({pruned_count/original_count*100:.1f}% kept)"
+                    )
+                    print(
+                        f"      Tokens: {original_tokens:,} → {pruned_tokens:,} ({pruned_tokens/max(1, original_tokens)*100:.1f}% kept)"
+                    )
 
                     # Warn if still over limit
                     if pruned_tokens > self.context_manager.max_tokens:
-                        print(f"      ⚠️  WARNING: Still over {self.context_manager.max_tokens:,} token limit!")
+                        print(
+                            f"      ⚠️  WARNING: Still over {self.context_manager.max_tokens:,} token limit!"
+                        )
                     else:
-                        print(f"      ✅ Under {self.context_manager.max_tokens:,} token limit")
+                        print(
+                            f"      ✅ Under {self.context_manager.max_tokens:,} token limit"
+                        )
 
                     # Store important context in hierarchical storage
                     self._store_batch_summary(result_messages, batch)
@@ -608,7 +677,7 @@ Remember:
         """
         try:
             for msg in messages:
-                content = str(getattr(msg, 'content', ''))
+                content = str(getattr(msg, "content", ""))
                 content_lower = content.lower()
 
                 # Skip empty or very short content
@@ -616,34 +685,43 @@ Remember:
                     continue
 
                 # Store errors for future reference
-                if any(kw in content_lower for kw in ['error', 'failed', 'exception', 'traceback']):
+                if any(
+                    kw in content_lower
+                    for kw in ["error", "failed", "exception", "traceback"]
+                ):
                     # Extract concise error summary
                     error_summary = content[:500] if len(content) > 500 else content
                     self.hierarchical_context.add(
                         content=f"[Batch {batch_num}] Error: {error_summary}",
                         source="reproduction",
                         entry_type="error",
-                        importance=0.9
+                        importance=0.9,
                     )
 
                 # Store successful results
-                elif any(kw in content_lower for kw in ['success', 'completed', 'accuracy', 'loss', 'metric']):
+                elif any(
+                    kw in content_lower
+                    for kw in ["success", "completed", "accuracy", "loss", "metric"]
+                ):
                     result_summary = content[:500] if len(content) > 500 else content
                     self.hierarchical_context.add(
                         content=f"[Batch {batch_num}] Result: {result_summary}",
                         source="reproduction",
                         entry_type="result",
-                        importance=1.0
+                        importance=1.0,
                     )
 
                 # Store important decisions/observations
-                elif any(kw in content_lower for kw in ['found', 'discovered', 'using', 'running']):
+                elif any(
+                    kw in content_lower
+                    for kw in ["found", "discovered", "using", "running"]
+                ):
                     observation = content[:300] if len(content) > 300 else content
                     self.hierarchical_context.add(
                         content=f"[Batch {batch_num}] {observation}",
                         source="reproduction",
                         entry_type="observation",
-                        importance=0.6
+                        importance=0.6,
                     )
 
         except Exception as e:
@@ -658,8 +736,7 @@ Remember:
         """
         try:
             relevant = self.hierarchical_context.retrieve(
-                query=query,
-                max_tokens=10000  # Budget for historical context
+                query=query, max_tokens=10000  # Budget for historical context
             )
 
             if not relevant:
@@ -667,8 +744,8 @@ Remember:
 
             sections = []
             for r in relevant[:5]:
-                source = r.get('source', 'context')
-                content = r.get('content', '')
+                source = r.get("source", "context")
+                content = r.get("content", "")
                 sections.append(f"[{source}] {content}")
 
             return "\n\n".join(sections)
@@ -677,7 +754,9 @@ Remember:
             print(f"   ⚠️  Warning: Failed to retrieve context: {e}")
             return ""
 
-    def _parse_reproduction_result(self, result: Dict, code_path: str, experiment_names: List[str] = None) -> Dict:
+    def _parse_reproduction_result(
+        self, result: Dict, code_path: str, experiment_names: List[str] = None
+    ) -> Dict:
         """Extract reproduction status from agent result."""
         messages = result.get("messages", [])
 
@@ -687,13 +766,11 @@ Remember:
             "setup_successful": False,
             "dependencies_installed": False,
             "python_compatible": True,
-
             # Dataset Preparation
             "data_attempted": False,
             "data_successful": False,
             "data_location": "",
             "data_manual_steps": "",
-
             # Experiments (NEW: Track multiple experiments)
             "sanity_check_attempted": False,
             "sanity_check_passed": False,
@@ -703,23 +780,20 @@ Remember:
             "experiments_tried": [],  # NEW: List of all experiments attempted
             "experiments_succeeded": [],  # NEW: List of successful experiments
             "partial_success": False,  # NEW: True if at least one experiment worked
-
             # READMEs
             "readmes_consulted": [],
             "nested_readmes_found": [],
-
             # NEW: Result Verification
             "result_files_found": [],  # NEW: Result files discovered
-            "result_files_used": [],   # NEW: Files used for verification
-            "extracted_metrics": {},   # NEW: Metrics extracted from result files
-            "verification_status": "", # NEW: "verified", "partial", "failed", "not_run"
-            "checkpoints_found": [],   # NEW: Checkpoints for resume
-            "can_resume": False,       # NEW: Whether experiment can be resumed
-
+            "result_files_used": [],  # NEW: Files used for verification
+            "extracted_metrics": {},  # NEW: Metrics extracted from result files
+            "verification_status": "",  # NEW: "verified", "partial", "failed", "not_run"
+            "checkpoints_found": [],  # NEW: Checkpoints for resume
+            "can_resume": False,  # NEW: Whether experiment can be resumed
             # Output
             "experiment_output": "",
             "errors": [],
-            "report": ""
+            "report": "",
         }
 
         # Handle agent errors
@@ -730,7 +804,7 @@ Remember:
 
         all_messages = []
         for msg in messages:
-            if hasattr(msg, 'content') and msg.content:
+            if hasattr(msg, "content") and msg.content:
                 content_str = normalize_message_content(msg.content)
                 all_messages.append(content_str)
 
@@ -747,36 +821,64 @@ Remember:
 
                 # Look for nested README mentions
                 import re
-                nested_patterns = re.findall(r'(\w+/[\w/]*readme\.md)', msg, re.IGNORECASE)
+
+                nested_patterns = re.findall(
+                    r"(\w+/[\w/]*readme\.md)", msg, re.IGNORECASE
+                )
                 for pattern in nested_patterns:
                     if pattern not in reproduction_info["nested_readmes_found"]:
                         reproduction_info["nested_readmes_found"].append(pattern)
                         reproduction_info["readmes_consulted"].append(pattern)
 
         # Check environment setup
-        if any(kw in full_output for kw in ["check_python_compatibility", "smart_install_dependencies", "installing dependencies", "setup", "conda env", "virtualenv", "pip install"]):
+        if any(
+            kw in full_output
+            for kw in [
+                "check_python_compatibility",
+                "smart_install_dependencies",
+                "installing dependencies",
+                "setup",
+                "conda env",
+                "virtualenv",
+                "pip install",
+            ]
+        ):
             reproduction_info["setup_attempted"] = True
 
             # STRICT: Only mark successful if we see VERIFICATION evidence
             # Don't trust "returncode 0" alone - need to see actual package presence
-            has_verification = any(kw in full_output for kw in [
-                "import loralib",  # Import test passed
-                "import transformers",  # Import test passed
-                "loralib" and "pip list",  # Package appears in pip list
-                "transformers" and "pip list",  # Package appears in pip list
-                "verification successful",  # Explicit verification message
-                "all packages installed and verified"  # Explicit verification message
-            ])
+            has_verification = any(
+                kw in full_output
+                for kw in [
+                    "import loralib",  # Import test passed
+                    "import transformers",  # Import test passed
+                    "loralib" and "pip list",  # Package appears in pip list
+                    "transformers" and "pip list",  # Package appears in pip list
+                    "verification successful",  # Explicit verification message
+                    "all packages installed and verified",  # Explicit verification message
+                ]
+            )
 
-            has_success_markers = any(kw in full_output for kw in [
-                "successfully installed", "installation successful", "dependencies installed", "setup successful",
-                "already exists", "already installed", "requirement already satisfied",
-                "environment is ready", "activated"
-            ])
+            has_success_markers = any(
+                kw in full_output
+                for kw in [
+                    "successfully installed",
+                    "installation successful",
+                    "dependencies installed",
+                    "setup successful",
+                    "already exists",
+                    "already installed",
+                    "requirement already satisfied",
+                    "environment is ready",
+                    "activated",
+                ]
+            )
 
             # Only mark as successful if we have BOTH success markers AND verification
             # OR if we explicitly see the packages in pip list
-            if has_verification or (has_success_markers and "modulenotfounderror" not in full_output):
+            if has_verification or (
+                has_success_markers and "modulenotfounderror" not in full_output
+            ):
                 reproduction_info["setup_successful"] = True
                 reproduction_info["dependencies_installed"] = True
 
@@ -793,23 +895,45 @@ Remember:
             reproduction_info["data_attempted"] = True
 
             # Check for successful data preparation
-            if any(kw in full_output for kw in ["data is in", "dataset found", "download successful", "data downloaded"]):
+            if any(
+                kw in full_output
+                for kw in [
+                    "data is in",
+                    "dataset found",
+                    "download successful",
+                    "data downloaded",
+                ]
+            ):
                 reproduction_info["data_successful"] = True
 
                 # Extract data location
                 for msg in all_messages:
-                    if any(kw in msg.lower() for kw in ["data is in", "data/", "datasets/", "examples/"]):
+                    if any(
+                        kw in msg.lower()
+                        for kw in ["data is in", "data/", "datasets/", "examples/"]
+                    ):
                         import re
-                        paths = re.findall(r'[\w/\-\.]+/(?:data|examples|datasets)[\w/\-\.]*', msg, re.IGNORECASE)
+
+                        paths = re.findall(
+                            r"[\w/\-\.]+/(?:data|examples|datasets)[\w/\-\.]*",
+                            msg,
+                            re.IGNORECASE,
+                        )
                         if paths:
                             reproduction_info["data_location"] = paths[0]
                             break
 
             # Check for manual steps needed
-            if any(kw in full_output for kw in ["manual", "you need to", "please download", "register"]):
+            if any(
+                kw in full_output
+                for kw in ["manual", "you need to", "please download", "register"]
+            ):
                 # Extract manual step instructions
                 for msg in all_messages:
-                    if any(kw in msg.lower() for kw in ["manual", "you need to", "please download"]):
+                    if any(
+                        kw in msg.lower()
+                        for kw in ["manual", "you need to", "please download"]
+                    ):
                         reproduction_info["data_manual_steps"] = msg[:300]
                         break
 
@@ -827,87 +951,159 @@ Remember:
                 exp_name_lower = exp_name.lower()
                 if exp_name_lower in msg_lower:
                     # Verify it's in an execution context
-                    context_window = msg_lower[max(0, msg_lower.find(exp_name_lower)-100):
-                                               min(len(msg_lower), msg_lower.find(exp_name_lower)+100)]
-                    if any(kw in context_window for kw in ["run", "execut", "train", "evaluat", "experiment", "test", "script"]):
+                    context_window = msg_lower[
+                        max(0, msg_lower.find(exp_name_lower) - 100) : min(
+                            len(msg_lower), msg_lower.find(exp_name_lower) + 100
+                        )
+                    ]
+                    if any(
+                        kw in context_window
+                        for kw in [
+                            "run",
+                            "execut",
+                            "train",
+                            "evaluat",
+                            "experiment",
+                            "test",
+                            "script",
+                        ]
+                    ):
                         if exp_name not in reproduction_info["experiments_tried"]:
                             reproduction_info["experiments_tried"].append(exp_name)
 
                     # STRICT: Only mark as succeeded if we see EXECUTION + METRICS/RESULTS
                     # Must have BOTH experiment execution indicators AND success/results
-                    has_execution = any(kw in msg_lower for kw in [
-                        "python -m torch", "bash ", "running experiment", "executing",
-                        "training", "evaluation", "testing", "inference"
-                    ])
-                    has_results = any(kw in msg_lower for kw in [
-                        "accuracy", "loss", "f1", "bleu", "rouge", "perplexity",
-                        "metric", "score", "result", "performance"
-                    ])
-                    has_success = any(kw in msg_lower for kw in [
-                        "completed successfully", "experiment.*success", "returncode: 0"
-                    ])
+                    has_execution = any(
+                        kw in msg_lower
+                        for kw in [
+                            "python -m torch",
+                            "bash ",
+                            "running experiment",
+                            "executing",
+                            "training",
+                            "evaluation",
+                            "testing",
+                            "inference",
+                        ]
+                    )
+                    has_results = any(
+                        kw in msg_lower
+                        for kw in [
+                            "accuracy",
+                            "loss",
+                            "f1",
+                            "bleu",
+                            "rouge",
+                            "perplexity",
+                            "metric",
+                            "score",
+                            "result",
+                            "performance",
+                        ]
+                    )
+                    has_success = any(
+                        kw in msg_lower
+                        for kw in [
+                            "completed successfully",
+                            "experiment.*success",
+                            "returncode: 0",
+                        ]
+                    )
 
                     # Only mark succeeded if BOTH execution happened AND got results/success
                     # NOT just environment setup success!
-                    if (has_execution and (has_results or has_success)) and "setup" not in msg_lower:
+                    if (
+                        has_execution and (has_results or has_success)
+                    ) and "setup" not in msg_lower:
                         if exp_name not in reproduction_info["experiments_succeeded"]:
                             reproduction_info["experiments_succeeded"].append(exp_name)
 
         if any(kw in full_output for kw in ["sanity check", "quickstart", "demo"]):
             reproduction_info["sanity_check_attempted"] = True
 
-            if any(kw in full_output for kw in ["sanity check passed", "sanity.*success", "demo.*success"]):
+            if any(
+                kw in full_output
+                for kw in ["sanity check passed", "sanity.*success", "demo.*success"]
+            ):
                 reproduction_info["sanity_check_passed"] = True
 
         # STRICT: Only detect main experiment if we see ACTUAL execution in command outputs
         # Look for actual command execution with results
-        has_training_cmd = any(kw in full_output for kw in [
-            '"returncode": 0',  # From execute_shell_command success
-            'torch.distributed.launch',  # PyTorch distributed training
-            'torchrun',  # PyTorch distributed training
-            'python -m torch'  # PyTorch training
-        ])
+        has_training_cmd = any(
+            kw in full_output
+            for kw in [
+                '"returncode": 0',  # From execute_shell_command success
+                "torch.distributed.launch",  # PyTorch distributed training
+                "torchrun",  # PyTorch distributed training
+                "python -m torch",  # PyTorch training
+            ]
+        )
 
         if has_training_cmd:
             reproduction_info["main_experiment_attempted"] = True
 
             # Look for successful execution WITH actual completion
             # Must see BOTH return code 0 AND not just from failed attempts
-            has_success_returncode = '"returncode": 0' in full_output and '"success": true' in full_output
-            has_error = 'modulenotfounderror' in full_output or 'error:' in full_output.lower() or 'no module named' in full_output
-            has_import_failure = 'import error' in full_output or 'importerror' in full_output
+            has_success_returncode = (
+                '"returncode": 0' in full_output and '"success": true' in full_output
+            )
+            has_error = (
+                "modulenotfounderror" in full_output
+                or "error:" in full_output.lower()
+                or "no module named" in full_output
+            )
+            has_import_failure = (
+                "import error" in full_output or "importerror" in full_output
+            )
 
             # Only mark as successful if we see returncode 0 WITHOUT any import/module errors
             if has_success_returncode and not has_error and not has_import_failure:
                 reproduction_info["main_experiment_successful"] = True
 
             # If we see import errors, mark setup as failed (environment broken)
-            if has_import_failure or (has_error and "modulenotfounderror" in full_output):
+            if has_import_failure or (
+                has_error and "modulenotfounderror" in full_output
+            ):
                 reproduction_info["setup_successful"] = False
                 reproduction_info["dependencies_installed"] = False
 
         # NEW: Detect partial success (STRICT: only if experiments actually succeeded)
-        if reproduction_info["experiments_succeeded"] or reproduction_info["main_experiment_successful"]:
+        if (
+            reproduction_info["experiments_succeeded"]
+            or reproduction_info["main_experiment_successful"]
+        ):
             reproduction_info["partial_success"] = True
 
         # Extract executed commands
         for msg in all_messages:
             if any(kw in msg.lower() for kw in ["executing", "running", "command:"]):
                 import re
+
                 # Look for python commands
-                commands = re.findall(r'python\s+[\w/\.\-]+(?:\s+--[\w\-]+\s+[\w\.\-]+)*', msg, re.IGNORECASE)
-                reproduction_info["executed_commands"].extend(commands[:3])  # Limit to 3
+                commands = re.findall(
+                    r"python\s+[\w/\.\-]+(?:\s+--[\w\-]+\s+[\w\.\-]+)*",
+                    msg,
+                    re.IGNORECASE,
+                )
+                reproduction_info["executed_commands"].extend(
+                    commands[:3]
+                )  # Limit to 3
 
         # Collect experiment output
         output_msgs = []
         for msg in all_messages:
             if any(kw in msg.lower() for kw in ["stdout", "output", "result"]):
                 output_msgs.append(msg)
-        reproduction_info["experiment_output"] = "\n".join(output_msgs[-3:])  # Last 3 output messages
+        reproduction_info["experiment_output"] = "\n".join(
+            output_msgs[-3:]
+        )  # Last 3 output messages
 
         # Collect errors
         for msg in all_messages:
-            if any(kw in msg.lower() for kw in ["error", "failed", "exception"]) and "no error" not in msg.lower():
+            if (
+                any(kw in msg.lower() for kw in ["error", "failed", "exception"])
+                and "no error" not in msg.lower()
+            ):
                 reproduction_info["errors"].append(msg[:200])
 
         # NEW: Detect result verification from messages
@@ -917,7 +1113,9 @@ Remember:
             # Detect result files found
             if "discover_result_files" in msg_lower or "result files" in msg_lower:
                 # Look for file paths
-                file_matches = re.findall(r'[\w/\-\.]+\.(?:json|csv|txt)', msg, re.IGNORECASE)
+                file_matches = re.findall(
+                    r"[\w/\-\.]+\.(?:json|csv|txt)", msg, re.IGNORECASE
+                )
                 for f in file_matches[:5]:
                     if f not in reproduction_info["result_files_found"]:
                         reproduction_info["result_files_found"].append(f)
@@ -925,16 +1123,22 @@ Remember:
             # Detect metrics extraction
             if "extracted metrics" in msg_lower or "read_result_files" in msg_lower:
                 # Look for metric patterns like "accuracy: 0.95"
-                metric_matches = re.findall(r'(\w+)\s*[:=]\s*(\d+\.?\d*)', msg, re.IGNORECASE)
+                metric_matches = re.findall(
+                    r"(\w+)\s*[:=]\s*(\d+\.?\d*)", msg, re.IGNORECASE
+                )
                 for name, value in metric_matches[:10]:
                     try:
-                        reproduction_info["extracted_metrics"][name.lower()] = float(value)
+                        reproduction_info["extracted_metrics"][name.lower()] = float(
+                            value
+                        )
                     except ValueError:
                         pass
 
             # Detect checkpoint status
             if "checkpoint" in msg_lower:
-                checkpoint_matches = re.findall(r'(checkpoint[_\-]?\d+|epoch[_\-]?\d+)', msg, re.IGNORECASE)
+                checkpoint_matches = re.findall(
+                    r"(checkpoint[_\-]?\d+|epoch[_\-]?\d+)", msg, re.IGNORECASE
+                )
                 for ckpt in checkpoint_matches[:5]:
                     if ckpt not in reproduction_info["checkpoints_found"]:
                         reproduction_info["checkpoints_found"].append(ckpt)
@@ -942,7 +1146,10 @@ Remember:
                     reproduction_info["can_resume"] = True
 
             # Detect verification status
-            if "verify_experiment_results" in msg_lower or "compare_with_paper" in msg_lower:
+            if (
+                "verify_experiment_results" in msg_lower
+                or "compare_with_paper" in msg_lower
+            ):
                 if "verified" in msg_lower and "success" in msg_lower:
                     reproduction_info["verification_status"] = "verified"
                 elif "partial" in msg_lower:
@@ -965,59 +1172,91 @@ Remember:
             report_parts = []
             report_parts.append("=== Unified Reproduction Report ===\n")
 
-            report_parts.append(f"READMEs Consulted: {', '.join(reproduction_info['readmes_consulted']) if reproduction_info['readmes_consulted'] else 'None'}")
+            report_parts.append(
+                f"READMEs Consulted: {', '.join(reproduction_info['readmes_consulted']) if reproduction_info['readmes_consulted'] else 'None'}"
+            )
 
-            report_parts.append(f"\nEnvironment Setup: {'✅ Success' if reproduction_info['setup_successful'] else '❌ Failed' if reproduction_info['setup_attempted'] else '⚠️  Not attempted'}")
+            report_parts.append(
+                f"\nEnvironment Setup: {'✅ Success' if reproduction_info['setup_successful'] else '❌ Failed' if reproduction_info['setup_attempted'] else '⚠️  Not attempted'}"
+            )
 
-            report_parts.append(f"Dataset Preparation: {'✅ Success' if reproduction_info['data_successful'] else '⚠️  Manual steps needed' if reproduction_info['data_manual_steps'] else '❌ Failed' if reproduction_info['data_attempted'] else '⚠️  Not attempted'}")
+            report_parts.append(
+                f"Dataset Preparation: {'✅ Success' if reproduction_info['data_successful'] else '⚠️  Manual steps needed' if reproduction_info['data_manual_steps'] else '❌ Failed' if reproduction_info['data_attempted'] else '⚠️  Not attempted'}"
+            )
             if reproduction_info["data_location"]:
-                report_parts.append(f"  Data Location: {reproduction_info['data_location']}")
+                report_parts.append(
+                    f"  Data Location: {reproduction_info['data_location']}"
+                )
 
-            report_parts.append(f"\nExperiments:")
+            report_parts.append("\nExperiments:")
 
             # NEW: Show multiple experiments if attempted
             if reproduction_info["experiments_tried"]:
-                report_parts.append(f"  Experiments Tried: {', '.join(reproduction_info['experiments_tried'])}")
+                report_parts.append(
+                    f"  Experiments Tried: {', '.join(reproduction_info['experiments_tried'])}"
+                )
                 if reproduction_info["experiments_succeeded"]:
-                    report_parts.append(f"  ✅ Succeeded: {', '.join(reproduction_info['experiments_succeeded'])}")
-                    report_parts.append(f"  🎯 PARTIAL SUCCESS - Some experiments reproduced!")
+                    report_parts.append(
+                        f"  ✅ Succeeded: {', '.join(reproduction_info['experiments_succeeded'])}"
+                    )
+                    report_parts.append(
+                        "  🎯 PARTIAL SUCCESS - Some experiments reproduced!"
+                    )
 
-            report_parts.append(f"  Sanity Check: {'✅ Passed' if reproduction_info['sanity_check_passed'] else '❌ Failed' if reproduction_info['sanity_check_attempted'] else '⚠️  Not run'}")
-            report_parts.append(f"  Main Experiment: {'✅ Success' if reproduction_info['main_experiment_successful'] else '❌ Failed' if reproduction_info['main_experiment_attempted'] else '⚠️  Not run'}")
+            report_parts.append(
+                f"  Sanity Check: {'✅ Passed' if reproduction_info['sanity_check_passed'] else '❌ Failed' if reproduction_info['sanity_check_attempted'] else '⚠️  Not run'}"
+            )
+            report_parts.append(
+                f"  Main Experiment: {'✅ Success' if reproduction_info['main_experiment_successful'] else '❌ Failed' if reproduction_info['main_experiment_attempted'] else '⚠️  Not run'}"
+            )
 
             # NEW: Result Verification Section
-            report_parts.append(f"\nResult Verification:")
+            report_parts.append("\nResult Verification:")
             if reproduction_info["result_files_found"]:
-                report_parts.append(f"  Result Files Found: {len(reproduction_info['result_files_found'])}")
+                report_parts.append(
+                    f"  Result Files Found: {len(reproduction_info['result_files_found'])}"
+                )
                 for f in reproduction_info["result_files_found"][:3]:
                     report_parts.append(f"    → {f}")
 
             if reproduction_info["extracted_metrics"]:
-                report_parts.append(f"  Extracted Metrics: {len(reproduction_info['extracted_metrics'])}")
-                for key, val in list(reproduction_info["extracted_metrics"].items())[:5]:
+                report_parts.append(
+                    f"  Extracted Metrics: {len(reproduction_info['extracted_metrics'])}"
+                )
+                for key, val in list(reproduction_info["extracted_metrics"].items())[
+                    :5
+                ]:
                     report_parts.append(f"    {key}: {val}")
 
             verification_status_display = {
                 "verified": "✅ VERIFIED - Results match paper!",
                 "partial": "⚠️  PARTIAL - Some metrics matched",
                 "failed": "❌ FAILED - Results don't match paper",
-                "not_run": "⚠️  NOT RUN - Verification not completed"
+                "not_run": "⚠️  NOT RUN - Verification not completed",
             }
-            report_parts.append(f"  Verification: {verification_status_display.get(reproduction_info['verification_status'], '⚠️  Unknown')}")
+            report_parts.append(
+                f"  Verification: {verification_status_display.get(reproduction_info['verification_status'], '⚠️  Unknown')}"
+            )
 
             if reproduction_info["checkpoints_found"]:
-                report_parts.append(f"\nCheckpoints Found: {len(reproduction_info['checkpoints_found'])}")
-                report_parts.append(f"  Can Resume: {'Yes' if reproduction_info['can_resume'] else 'No'}")
+                report_parts.append(
+                    f"\nCheckpoints Found: {len(reproduction_info['checkpoints_found'])}"
+                )
+                report_parts.append(
+                    f"  Can Resume: {'Yes' if reproduction_info['can_resume'] else 'No'}"
+                )
                 for ckpt in reproduction_info["checkpoints_found"][:3]:
                     report_parts.append(f"    → {ckpt}")
 
             if reproduction_info["executed_commands"]:
-                report_parts.append(f"\nCommands Executed:")
+                report_parts.append("\nCommands Executed:")
                 for cmd in reproduction_info["executed_commands"][:3]:
                     report_parts.append(f"  - {cmd}")
 
             if reproduction_info["errors"]:
-                report_parts.append(f"\nErrors: {len(reproduction_info['errors'])} error(s) encountered")
+                report_parts.append(
+                    f"\nErrors: {len(reproduction_info['errors'])} error(s) encountered"
+                )
 
             report_parts.append(f"\n\nAgent Summary:\n{last_msg[:500]}")
 

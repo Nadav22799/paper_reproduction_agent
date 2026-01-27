@@ -4,7 +4,7 @@ import time
 import sys
 import os
 from datetime import timedelta
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from dataclasses import dataclass, field
 from threading import Thread, Event
 
@@ -12,6 +12,7 @@ from threading import Thread, Event
 @dataclass
 class PhaseMetrics:
     """Metrics for a single workflow phase."""
+
     name: str
     start_time: Optional[float] = None
     end_time: Optional[float] = None
@@ -37,6 +38,7 @@ class PhaseMetrics:
 @dataclass
 class WorkflowMetrics:
     """Aggregated metrics for entire workflow."""
+
     phases: Dict[str, PhaseMetrics] = field(default_factory=dict)
     workflow_start: Optional[float] = None
     workflow_end: Optional[float] = None
@@ -44,20 +46,33 @@ class WorkflowMetrics:
     total_llm_tokens_output: int = 0
 
     # Cost rates (per 1M tokens) - configurable
-    input_cost_per_million: float = 3.00   # Default: GPT-4 Turbo input
+    input_cost_per_million: float = 3.00  # Default: GPT-4 Turbo input
     output_cost_per_million: float = 15.00  # Default: GPT-4 Turbo output
 
 
 class MetricsTracker:
     """Tracks timing, costs, and provides live progress display."""
 
-    PHASE_NAMES = [
+    LEGACY_PHASES = [
         "analyze_paper",
         "decide_and_clone",
         "environment_setup",
         "unified_reproduction",
         "extract_and_verify",
-        "generate_report"
+        "generate_report",
+    ]
+
+    SUPERVISOR_PHASES = [
+        "analyze_paper",
+        "decide_and_clone",
+        "planning",
+        "supervisor",
+        "critic",
+        "environment_setup",
+        "data_prep",
+        "execution",
+        "validation",
+        "generate_report",
     ]
 
     def __init__(
@@ -65,7 +80,8 @@ class MetricsTracker:
         enable_live_display: bool = True,
         update_interval: int = 15,
         input_cost_per_million: float = 3.00,
-        output_cost_per_million: float = 15.00
+        output_cost_per_million: float = 15.00,
+        phases: Optional[list] = None,
     ):
         """
         Initialize MetricsTracker.
@@ -75,25 +91,29 @@ class MetricsTracker:
             update_interval: Seconds between live display updates
             input_cost_per_million: Cost per 1M input tokens
             output_cost_per_million: Cost per 1M output tokens
+            phases: List of phases to track. Defaults to LEGACY_PHASES.
         """
         # Load defaults from env if not provided
         if input_cost_per_million == 3.00:  # Default value check
-             input_cost_per_million = float(os.getenv("LLM_INPUT_COST_PER_M", "3.00"))
-        if output_cost_per_million == 15.00: # Default value check
-             output_cost_per_million = float(os.getenv("LLM_OUTPUT_COST_PER_M", "15.00"))
+            input_cost_per_million = float(os.getenv("LLM_INPUT_COST_PER_M", "3.00"))
+        if output_cost_per_million == 15.00:  # Default value check
+            output_cost_per_million = float(os.getenv("LLM_OUTPUT_COST_PER_M", "15.00"))
 
         self.metrics = WorkflowMetrics(
             input_cost_per_million=input_cost_per_million,
-            output_cost_per_million=output_cost_per_million
+            output_cost_per_million=output_cost_per_million,
         )
         self.enable_live_display = enable_live_display
         self.update_interval = update_interval
         self._stop_display = Event()
         self._display_thread: Optional[Thread] = None
         self._current_phase: Optional[str] = None
+        
+        # Determine which phases to track
+        self.tracked_phases = phases if phases else self.LEGACY_PHASES
 
         # Initialize phase metrics
-        for phase in self.PHASE_NAMES:
+        for phase in self.tracked_phases:
             self.metrics.phases[phase] = PhaseMetrics(name=phase)
 
     def start_workflow(self):
@@ -135,7 +155,9 @@ class MetricsTracker:
         if phase_name in self.metrics.phases:
             self.metrics.phases[phase_name].experiment_wall_time += wall_time
 
-    def record_tokens(self, input_tokens: int, output_tokens: int, phase_name: Optional[str] = None):
+    def record_tokens(
+        self, input_tokens: int, output_tokens: int, phase_name: Optional[str] = None
+    ):
         """Record token usage."""
         self.metrics.total_llm_tokens_input += input_tokens
         self.metrics.total_llm_tokens_output += output_tokens
@@ -147,8 +169,12 @@ class MetricsTracker:
 
     def estimate_cost(self) -> float:
         """Estimate total cost from token usage."""
-        input_cost = (self.metrics.total_llm_tokens_input / 1_000_000) * self.metrics.input_cost_per_million
-        output_cost = (self.metrics.total_llm_tokens_output / 1_000_000) * self.metrics.output_cost_per_million
+        input_cost = (
+            self.metrics.total_llm_tokens_input / 1_000_000
+        ) * self.metrics.input_cost_per_million
+        output_cost = (
+            self.metrics.total_llm_tokens_output / 1_000_000
+        ) * self.metrics.output_cost_per_million
         return input_cost + output_cost
 
     def get_total_duration(self) -> float:
@@ -181,14 +207,16 @@ class MetricsTracker:
         """Print current progress status."""
         elapsed = self.get_total_duration()
         cost = self.estimate_cost()
-        total_tokens = self.metrics.total_llm_tokens_input + self.metrics.total_llm_tokens_output
+        total_tokens = (
+            self.metrics.total_llm_tokens_input + self.metrics.total_llm_tokens_output
+        )
 
         # Build status line
         status_parts = [
             f"[{self._format_duration(elapsed)}]",
             f"Phase: {self._current_phase or 'idle'}",
             f"Est. Cost: ${cost:.4f}",
-            f"Tokens: {total_tokens:,}"
+            f"Tokens: {total_tokens:,}",
         ]
 
         # Print on new line with distinctive prefix (visible even with interleaved output)
@@ -200,10 +228,12 @@ class MetricsTracker:
         """Print a brief summary of cost and time so far."""
         if not self.enable_live_display:
             return
-            
+
         elapsed = self.get_total_duration()
         cost = self.estimate_cost()
-        print(f"\n💰 Current Metrics: Duration: {self._format_duration(elapsed)} | Cost: ${cost:.4f}\n")
+        print(
+            f"\n💰 Current Metrics: Duration: {self._format_duration(elapsed)} | Cost: ${cost:.4f}\n"
+        )
 
     def _format_duration(self, seconds: float) -> str:
         """Format duration as HH:MM:SS."""
@@ -223,14 +253,14 @@ class MetricsTracker:
 
         # Phase breakdown
         lines.append("\n--- Phase Breakdown ---")
-        for phase_name in self.PHASE_NAMES:
+        for phase_name in self.tracked_phases:
             phase = self.metrics.phases[phase_name]
             if phase.start_time is not None:
                 status_icon = {
                     "completed": " OK ",
                     "failed": "FAIL",
                     "running": " .. ",
-                    "pending": " -- "
+                    "pending": " -- ",
                 }
                 icon = status_icon.get(phase.status, " ?? ")
                 lines.append(
@@ -244,13 +274,15 @@ class MetricsTracker:
         # Time breakdown
         total_experiment_time = self.get_total_experiment_time()
         llm_time = self.get_total_llm_time()
-        lines.append(f"\n--- Time Breakdown ---")
+        lines.append("\n--- Time Breakdown ---")
         lines.append(f"  LLM/Agent Time:     {self._format_duration(llm_time)}")
-        lines.append(f"  Experiment Time:    {self._format_duration(total_experiment_time)}")
+        lines.append(
+            f"  Experiment Time:    {self._format_duration(total_experiment_time)}"
+        )
         lines.append(f"  Total:              {self._format_duration(total_duration)}")
 
         # Cost breakdown
-        lines.append(f"\n--- Cost Estimate ---")
+        lines.append("\n--- Cost Estimate ---")
         lines.append(f"  Input Tokens:  {self.metrics.total_llm_tokens_input:>12,}")
         lines.append(f"  Output Tokens: {self.metrics.total_llm_tokens_output:>12,}")
         lines.append(f"  Estimated Cost: ${self.estimate_cost():.4f}")
@@ -276,7 +308,7 @@ class MetricsTracker:
             "experiment_wall_time": phase.experiment_wall_time,
             "llm_time": phase.llm_time,
             "llm_tokens_input": phase.llm_tokens_input,
-            "llm_tokens_output": phase.llm_tokens_output
+            "llm_tokens_output": phase.llm_tokens_output,
         }
 
     def get_all_stats(self) -> Dict:
@@ -288,8 +320,5 @@ class MetricsTracker:
             "total_tokens_input": self.metrics.total_llm_tokens_input,
             "total_tokens_output": self.metrics.total_llm_tokens_output,
             "estimated_cost": self.estimate_cost(),
-            "phases": {
-                name: self.get_phase_stats(name)
-                for name in self.PHASE_NAMES
-            }
+            "phases": {name: self.get_phase_stats(name) for name in self.tracked_phases},
         }

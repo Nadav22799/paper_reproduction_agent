@@ -2,10 +2,8 @@
 
 import re
 import arxiv
-import requests
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from PyPDF2 import PdfReader
-from bs4 import BeautifulSoup
 from langchain.tools import tool
 
 
@@ -22,6 +20,7 @@ def fetch_arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
     """
     try:
         import os
+
         search = arxiv.Search(id_list=[arxiv_id])
         paper = next(search.results())
 
@@ -45,6 +44,7 @@ def fetch_arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
         }
     except Exception as e:
         return {"error": f"Failed to fetch paper: {str(e)}"}
+
 
 @tool
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -81,17 +81,19 @@ def extract_algorithm_pseudocode(paper_text: str) -> List[str]:
     algorithms = []
 
     # Pattern for algorithm environments in LaTeX
-    algorithm_pattern = r'\\begin{algorithm}(.*?)\\end{algorithm}'
+    algorithm_pattern = r"\\begin{algorithm}(.*?)\\end{algorithm}"
     matches = re.findall(algorithm_pattern, paper_text, re.DOTALL)
     algorithms.extend(matches)
 
     # Pattern for algorithmic environments
-    algorithmic_pattern = r'\\begin{algorithmic}(.*?)\\end{algorithmic}'
+    algorithmic_pattern = r"\\begin{algorithmic}(.*?)\\end{algorithmic}"
     matches = re.findall(algorithmic_pattern, paper_text, re.DOTALL)
     algorithms.extend(matches)
 
     # Look for "Algorithm" sections
-    algo_section_pattern = r'Algorithm \d+:?(.*?)(?=Algorithm \d+:|\\section|\\subsection|$)'
+    algo_section_pattern = (
+        r"Algorithm \d+:?(.*?)(?=Algorithm \d+:|\\section|\\subsection|$)"
+    )
     matches = re.findall(algo_section_pattern, paper_text, re.DOTALL)
     algorithms.extend([m.strip() for m in matches if m.strip()])
 
@@ -118,9 +120,9 @@ def extract_experimental_setup(paper_text: str) -> Dict[str, Any]:
 
     # Look for common section headers
     sections = {
-        "experiment": r'(?:Experiments?|Experimental Setup|Evaluation)(.*?)(?=\n#|\n\\section)',
-        "dataset": r'(?:Datasets?|Data)(.*?)(?=\n#|\n\\section)',
-        "metric": r'(?:Metrics?|Evaluation Metrics?)(.*?)(?=\n#|\n\\section)',
+        "experiment": r"(?:Experiments?|Experimental Setup|Evaluation)(.*?)(?=\n#|\n\\section)",
+        "dataset": r"(?:Datasets?|Data)(.*?)(?=\n#|\n\\section)",
+        "metric": r"(?:Metrics?|Evaluation Metrics?)(.*?)(?=\n#|\n\\section)",
     }
 
     for key, pattern in sections.items():
@@ -130,9 +132,9 @@ def extract_experimental_setup(paper_text: str) -> Dict[str, Any]:
 
     # Extract common dataset names
     dataset_patterns = [
-        r'\b(MNIST|CIFAR-?10|CIFAR-?100|ImageNet|COCO|VOC)\b',
-        r'\b(SQuAD|GLUE|SuperGLUE|WikiText)\b',
-        r'\b(LibriSpeech|CommonVoice)\b',
+        r"\b(MNIST|CIFAR-?10|CIFAR-?100|ImageNet|COCO|VOC)\b",
+        r"\b(SQuAD|GLUE|SuperGLUE|WikiText)\b",
+        r"\b(LibriSpeech|CommonVoice)\b",
     ]
 
     for pattern in dataset_patterns:
@@ -141,8 +143,8 @@ def extract_experimental_setup(paper_text: str) -> Dict[str, Any]:
 
     # Extract metrics
     metric_patterns = [
-        r'\b(accuracy|precision|recall|F1|BLEU|ROUGE|perplexity|loss)\b',
-        r'\b(mAP|IoU|AUC|ROC)\b',
+        r"\b(accuracy|precision|recall|F1|BLEU|ROUGE|perplexity|loss)\b",
+        r"\b(mAP|IoU|AUC|ROC)\b",
     ]
 
     for pattern in metric_patterns:
@@ -166,12 +168,12 @@ def extract_results_tables(paper_text: str) -> List[str]:
     tables = []
 
     # LaTeX table pattern
-    table_pattern = r'\\begin{table}(.*?)\\end{table}'
+    table_pattern = r"\\begin{table}(.*?)\\end{table}"
     matches = re.findall(table_pattern, paper_text, re.DOTALL)
     tables.extend(matches)
 
     # Tabular pattern
-    tabular_pattern = r'\\begin{tabular}(.*?)\\end{tabular}'
+    tabular_pattern = r"\\begin{tabular}(.*?)\\end{tabular}"
     matches = re.findall(tabular_pattern, paper_text, re.DOTALL)
     tables.extend(matches)
 
@@ -199,9 +201,18 @@ def extract_code_references(paper_text: str) -> List[str]:
     # Search for each platform
     # Patterns handle URLs split across lines with optional whitespace/newlines
     platforms = [
-        ('github.com', r'https?://(?:www\.)?github\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)'),
-        ('gitlab.com', r'https?://(?:www\.)?gitlab\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)'),
-        ('bitbucket.org', r'https?://(?:www\.)?bitbucket\.org/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)'),
+        (
+            "github.com",
+            r"https?://(?:www\.)?github\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)",
+        ),
+        (
+            "gitlab.com",
+            r"https?://(?:www\.)?gitlab\.com/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)",
+        ),
+        (
+            "bitbucket.org",
+            r"https?://(?:www\.)?bitbucket\.org/\s*\n?\s*([\w\-\.]+)\s*/\s*\n?\s*([\w\-\.]+)",
+        ),
     ]
 
     for platform_name, url_pattern in platforms:

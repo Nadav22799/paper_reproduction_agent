@@ -30,6 +30,18 @@ env/
 ENV/
 .venv
 
+# Package Manager Executables
+micromamba.exe
+miniconda.sh
+Miniforge3-Windows-x86_64.exe
+
+# Project Specific
+**/MagicMoke/
+**/MagicMock/
+**/.ruff_cache/
+**/checkpoints/
+**/logs/
+
 # Environment variables (anywhere in project)
 .env
 **/.env
