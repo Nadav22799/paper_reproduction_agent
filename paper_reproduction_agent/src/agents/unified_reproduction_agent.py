@@ -696,6 +696,7 @@ Remember:
                         source="reproduction",
                         entry_type="error",
                         importance=0.9,
+                        lazy=True,  # Defer embedding to avoid loading SentenceTransformer
                     )
 
                 # Store successful results
@@ -709,6 +710,7 @@ Remember:
                         source="reproduction",
                         entry_type="result",
                         importance=1.0,
+                        lazy=True,  # Defer embedding to avoid loading SentenceTransformer
                     )
 
                 # Store important decisions/observations
@@ -722,6 +724,7 @@ Remember:
                         source="reproduction",
                         entry_type="observation",
                         importance=0.6,
+                        lazy=True,  # Defer embedding to avoid loading SentenceTransformer
                     )
 
         except Exception as e:

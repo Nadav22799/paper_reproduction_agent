@@ -33,6 +33,7 @@ class ContextEntry:
     importance: float = 0.5  # 0.0 to 1.0
     tokens: int = 0
     embedding: Optional[List[float]] = None
+    pending_embedding: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage."""
@@ -96,6 +97,7 @@ class HierarchicalContextManager:
         max_tokens: int = 50000,
         embedding_model: str = "all-MiniLM-L6-v2",
         collection_name: Optional[str] = None,
+        embedder: Optional[Any] = None,
     ):
         """
         Initialize hierarchical context manager.
@@ -104,8 +106,10 @@ class HierarchicalContextManager:
             model_name: Model name for tokenizer selection (gpt-4, claude, etc.)
             hot_capacity: Maximum entries in hot storage before compaction
             max_tokens: Maximum tokens to return from retrieval
-            embedding_model: Sentence transformer model for embeddings
+            embedding_model: Sentence transformer model for embeddings (used if embedder not provided)
             collection_name: ChromaDB collection name (auto-generated if None)
+            embedder: External embedder instance (e.g., GeminiEmbedder). If provided,
+                      bypasses local SentenceTransformer loading for faster startup.
         """
         self.model_name = model_name
         self.hot_capacity = hot_capacity
@@ -115,8 +119,9 @@ class HierarchicalContextManager:
         # Initialize tokenizer
         self._init_tokenizer()
 
-        # Initialize embedding model (lazy load)
-        self._embedder = None
+        # Use provided embedder or lazy-load local model later
+        self._embedder = embedder
+        self._embedder_provided = embedder is not None
 
         # Hot storage: OrderedDict for LRU-like behavior
         self.hot_context: OrderedDict[str, ContextEntry] = OrderedDict()
@@ -153,7 +158,12 @@ class HierarchicalContextManager:
 
     @property
     def embedder(self):
-        """Lazy load embedding model."""
+        """Return embedder (provided externally or lazy-loaded local model)."""
+        # If embedder was provided externally, use it
+        if self._embedder_provided:
+            return self._embedder
+
+        # Otherwise, lazy-load local SentenceTransformer
         if self._embedder is None:
             try:
                 from sentence_transformers import SentenceTransformer
@@ -207,9 +217,10 @@ class HierarchicalContextManager:
     def add(
         self,
         content: str,
-        source: str,
+        source: str = "unknown",
         entry_type: str = "observation",
         importance: Optional[float] = None,
+        lazy: bool = False,
     ) -> str:
         """
         Add new context entry to storage.
@@ -222,6 +233,7 @@ class HierarchicalContextManager:
             source: Source identifier (paper_analyzer, reproduction, etc.)
             entry_type: Type of entry (result, error, decision, observation, debug)
             importance: Override importance score (0.0 to 1.0)
+            lazy: If True, skip embedding generation (useful for rapid initialization)
 
         Returns:
             Entry ID
@@ -238,9 +250,9 @@ class HierarchicalContextManager:
         entry_id = self.generate_id(content, source)
         tokens = self.count_tokens(content)
 
-        # Generate embedding if available
+        # Generate embedding if available AND NOT LAZY
         embedding = None
-        if self.embedder:
+        if not lazy and self.embedder:
             try:
                 embedding = self.embedder.encode(content).tolist()
             except Exception as e:
@@ -254,14 +266,15 @@ class HierarchicalContextManager:
             importance=importance,
             tokens=tokens,
             embedding=embedding,
+            pending_embedding=lazy,
         )
 
         # Add to hot storage
         self.hot_context[entry_id] = entry
         self.hot_tokens += tokens
 
-        # Add to warm storage (vector store)
-        if self.collection and embedding:
+        # Add to warm storage (vector store) immediately ONLY if not lazy and embedding exists
+        if not lazy and self.collection and embedding:
             try:
                 self.collection.add(
                     ids=[entry_id],
@@ -278,10 +291,53 @@ class HierarchicalContextManager:
 
         logger.debug(
             f"Added context entry: id={entry_id}, source={source}, "
-            f"type={entry_type}, tokens={tokens}"
+            f"type={entry_type}, tokens={tokens}, lazy={lazy}"
         )
 
         return entry_id
+
+    def flush_embeddings(self):
+        """
+        Process any pending embeddings in hot storage.
+        
+        This forces the embedding model to load and processes all entries
+        marked as pending_embedding. Call this before starting phases
+        that require semantic retrieval.
+        """
+        pending_entries = [
+            e for e in self.hot_context.values() if e.pending_embedding
+        ]
+        
+        if not pending_entries:
+            return
+
+        logger.info(f"Flushing embeddings for {len(pending_entries)} pending entries...")
+        
+        # Ensure model is loaded
+        if not self.embedder:
+            logger.warning("Embedder unavailable, skipping flush")
+            return
+
+        count = 0
+        for entry in pending_entries:
+            try:
+                # Generate embedding
+                entry.embedding = self.embedder.encode(entry.content).tolist()
+                entry.pending_embedding = False
+                
+                # Update vector store
+                if self.collection:
+                    self.collection.add(
+                        ids=[entry.id],
+                        embeddings=[entry.embedding],
+                        metadatas=[entry.to_dict()],
+                        documents=[entry.content],
+                    )
+                count += 1
+            except Exception as e:
+                logger.warning(f"Failed to generate embedding during flush: {e}")
+
+        logger.info(f"Successfully generated embeddings for {count} entries")
 
     def _compact_hot_to_warm(self):
         """
@@ -697,3 +753,91 @@ class HierarchicalContextManager:
             f"cold={stats['cold_summaries']}, "
             f"tokens={stats['hot_tokens']}/{self.max_tokens})"
         )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize manager state to dictionary for checkpoint saving.
+
+        Note: ChromaDB (warm storage) is not directly serialized as it's ephemeral.
+        Hot entries with embeddings will be re-added to warm storage on restore.
+
+        Returns:
+            Dictionary containing serializable state
+        """
+        hot_entries = []
+        for entry_id, entry in self.hot_context.items():
+            entry_dict = entry.to_dict()
+            # Include embedding if available (for restoration to warm storage)
+            if entry.embedding:
+                entry_dict["embedding"] = entry.embedding
+            hot_entries.append(entry_dict)
+
+        return {
+            "model_name": self.model_name,
+            "hot_capacity": self.hot_capacity,
+            "max_tokens": self.max_tokens,
+            "embedding_model_name": self.embedding_model_name,
+            "collection_name": self._collection_name,
+            "hot_entries": hot_entries,
+            "hot_tokens": self.hot_tokens,
+            "cold_summaries": list(self.cold_summaries),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "HierarchicalContextManager":
+        """
+        Restore manager state from dictionary.
+
+        Creates a new instance with restored hot and cold storage.
+        Entries with embeddings are re-added to warm storage.
+
+        Args:
+            data: Dictionary from to_dict()
+
+        Returns:
+            Restored HierarchicalContextManager instance
+        """
+        manager = cls(
+            model_name=data.get("model_name", "gpt-4"),
+            hot_capacity=data.get("hot_capacity", 30),
+            max_tokens=data.get("max_tokens", 50000),
+            embedding_model=data.get("embedding_model_name", "all-MiniLM-L6-v2"),
+            collection_name=data.get("collection_name"),
+        )
+
+        # Restore cold summaries
+        manager.cold_summaries = list(data.get("cold_summaries", []))
+
+        # Restore hot entries
+        for entry_data in data.get("hot_entries", []):
+            entry = ContextEntry(
+                id=entry_data["id"],
+                content=entry_data["content"],
+                source=entry_data["source"],
+                entry_type=entry_data["entry_type"],
+                timestamp=entry_data.get("timestamp", time.time()),
+                importance=entry_data.get("importance", 0.5),
+                tokens=entry_data.get("tokens", 0),
+                embedding=entry_data.get("embedding"),
+            )
+            manager.hot_context[entry.id] = entry
+            manager.hot_tokens += entry.tokens
+
+            # Re-add to warm storage if embedding available
+            if entry.embedding and manager.collection:
+                try:
+                    manager.collection.add(
+                        ids=[entry.id],
+                        embeddings=[entry.embedding],
+                        metadatas=[entry.to_dict()],
+                        documents=[entry.content],
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to restore entry to warm storage: {e}")
+
+        logger.info(
+            f"Restored HierarchicalContextManager: "
+            f"hot={len(manager.hot_context)}, cold={len(manager.cold_summaries)}"
+        )
+
+        return manager

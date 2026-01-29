@@ -20,113 +20,34 @@ from ..tools.code_execution_tools import (
     search_error_solution,
 )
 from ..utils.llm_factory import create_llm
+from ..utils.hierarchical_context import HierarchicalContextManager
 
 
 class DataPrepAgent:
     """Handles dataset preparation for reproduction experiments."""
 
-    def __init__(self, llm=None, max_iterations: int = 50, metrics_tracker=None):
+    def __init__(
+        self,
+        llm=None,
+        max_iterations: int = 50,
+        metrics_tracker=None,
+        hierarchical_context: HierarchicalContextManager = None,
+    ):
         """Initialize the Data Preparation Agent.
 
         Args:
             llm: Language model to use
             max_iterations: Maximum iterations for the ReAct agent
             metrics_tracker: Optional metrics tracker for observability
+            hierarchical_context: Shared context manager for cross-agent knowledge
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
+        self.hierarchical_context = hierarchical_context
 
-        self.system_prompt = """You are a Data Preparation Specialist for ML paper reproduction.
-
-GOAL: REPRODUCE PAPER RESULTS
-You are part of an automated system designed to reproduce the results of a scientific paper. Your individual tasks must always serve this ultimate goal.
-
-═══════════════════════════════════════════════════════════════
-CRITICAL: REASONING-FIRST PROTOCOL
-═══════════════════════════════════════════════════════════════
-
-Before EVERY action, you MUST:
-1. Explain WHY you are taking this action
-2. State what you expect to happen
-3. Only then execute the action
-
-Example:
-REASONING: I need to download the CIFAR-10 dataset because the README indicates
-it's required for the main experiment. I'll use the provided download script.
-ACTION: execute_shell_command("python scripts/download_data.py")
-
-═══════════════════════════════════════════════════════════════
-YOUR RESPONSIBILITIES
-═══════════════════════════════════════════════════════════════
-
-1. Read the reproduction_checklist.md to understand data requirements
-2. Find data download instructions in README or scripts
-3. Download all required datasets
-4. Verify data integrity (check file sizes, sample counts)
-5. Update the checklist with data locations and status
-
-═══════════════════════════════════════════════════════════════
-DATA DOWNLOAD PATTERNS
-═══════════════════════════════════════════════════════════════
-
-1. **Script-based**: Look for download scripts (download_data.py, prepare_data.sh)
-2. **Manual URLs**: Download from URLs mentioned in README
-3. **Torchvision/HuggingFace**: Auto-download via code (just verify directory exists)
-4. **Kaggle**: May require kaggle CLI or manual download
-
-COMMON DATA LOCATIONS:
-- ./data/
-- ./datasets/
-- ./DATA/
-- ./{dataset_name}/
-
-═══════════════════════════════════════════════════════════════
-ERROR HANDLING
-═══════════════════════════════════════════════════════════════
-
-If download fails:
-1. Check if partial download exists (delete and retry)
-2. Search for alternative download URLs
-3. Use search_error_solution to find common fixes
-4. Document any manual steps required
-
-If data requires preprocessing:
-1. Run preprocessing scripts from README
-2. Verify output format matches expected
-
-═══════════════════════════════════════════════════════════════
-ENVIRONMENT RULES
-═══════════════════════════════════════════════════════════════
-
-Use ONE-LINE patterns for commands:
-- `conda run -n [env_name] python script.py`
-- `source venv/bin/activate && python script.py`
-
-Read the checklist first to find the environment name!
-
-═══════════════════════════════════════════════════════════════
-COMPLETION
-═══════════════════════════════════════════════════════════════
-
-When done, provide a summary:
-- Datasets downloaded: [list]
-- Data locations: [paths]
-- Verification status: [passed/failed]
-- Any issues encountered: [list]
-═══════════════════════════════════════════════════════════════
-RECOVERY MODE (When "Resolve data error" is requested)
-═══════════════════════════════════════════════════════════════
-If you receive a directive starting with "Resolve data error":
-1. READ the error message carefully.
-2. CHECK if the file exists in a different location (e.g. `gcn/data` vs `data`).
-   - Use `find . -name [filename]` to search.
-   - If found in wrong place -> MOVE IT: `mv [found_path] [expected_path]`.
-3. If NOT found -> DOWNLOAD IT (using download instructions).
-4. If stuck -> Request human help.
-
-Do not restart valid downloads - only fix what is broken.
-"""
+        from ..config.prompts import DATA_PREP_AGENT_PROMPT
+        self.system_prompt = DATA_PREP_AGENT_PROMPT
 
         self.tools = [
             read_file,

@@ -17,23 +17,37 @@ from ..tools.code_execution_tools import (
     list_directory,
     execute_shell_command,
 )
+from ..tools.file_utils import (
+    grep_in_directory,
+    find_files,
+)
+from langchain_community.tools import DuckDuckGoSearchRun
 from ..utils.llm_factory import create_llm
+from ..utils.hierarchical_context import HierarchicalContextManager
 
 
 class PlanningAgent:
     """Creates upfront reproduction plan based on README analysis."""
 
-    def __init__(self, llm=None, max_iterations: int = 30, metrics_tracker=None):
+    def __init__(
+        self,
+        llm=None,
+        max_iterations: int = 30,
+        metrics_tracker=None,
+        hierarchical_context: HierarchicalContextManager = None,
+    ):
         """Initialize the Planning Agent.
 
         Args:
             llm: Language model to use
             max_iterations: Maximum iterations for the ReAct agent
             metrics_tracker: Optional metrics tracker for observability
+            hierarchical_context: Shared context manager for cross-agent knowledge
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
+        self.hierarchical_context = hierarchical_context
 
         self.system_prompt = """You are a Planning Specialist for ML paper reproduction.
 
@@ -75,6 +89,7 @@ Create reproduction_checklist.md in the repository root with this structure:
 **Python Version:** [detected from files]
 
 - [ ] Read README and detect recommended tool (micromamba/conda/pip/etc)
+- [ ] **MISSING PYTHON VERSION?** If not specified in README, USE THE SEARCH TOOL to find the correct version based on project name or key packages.
 - [ ] Check if recommended tool is installed
 - [ ] Install tool if missing
 - [ ] Analyze environment.yaml/requirements.txt (check for unpinned packages)
@@ -169,6 +184,7 @@ After creating the checklist, respond with a summary of what you found.
         self.tools = [
             read_file,
             list_directory,
+            DuckDuckGoSearchRun(),
         ]
 
     def create_plan(self, state: Dict) -> Dict:

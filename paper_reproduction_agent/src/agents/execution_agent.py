@@ -26,150 +26,38 @@ from ..tools.code_execution_tools import (
 )
 from ..utils.llm_factory import create_llm
 from ..utils.resource_detector import detect_system_resources, get_experiment_strategy
+from ..utils.hierarchical_context import HierarchicalContextManager
 
 
 class ExecutionAgent:
     """Handles experiment execution for reproduction."""
 
-    def __init__(self, llm=None, max_iterations: int = 50, metrics_tracker=None):
+    def __init__(
+        self,
+        llm=None,
+        max_iterations: int = 50,
+        metrics_tracker=None,
+        hierarchical_context: HierarchicalContextManager = None,
+    ):
         """Initialize the Execution Agent.
 
         Args:
             llm: Language model to use
             max_iterations: Maximum iterations for the ReAct agent
             metrics_tracker: Optional metrics tracker for observability
+            hierarchical_context: Shared context manager for cross-agent knowledge
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
+        self.hierarchical_context = hierarchical_context
 
         # Detect system resources
         self.resources = detect_system_resources()
         self.experiment_strategy = get_experiment_strategy(self.resources)
 
-        self.system_prompt = """You are an Experiment Execution Specialist for ML paper reproduction.
-
-GOAL: REPRODUCE PAPER RESULTS
-You are part of an automated system designed to reproduce the results of a scientific paper. Your individual tasks must always serve this ultimate goal.
-
-═══════════════════════════════════════════════════════════════
-CRITICAL: REASONING-FIRST PROTOCOL
-═══════════════════════════════════════════════════════════════
-
-Before EVERY action, you MUST:
-1. Explain WHY you are taking this action
-2. State what you expect to happen
-3. Only then execute the action
-
-═══════════════════════════════════════════════════════════════
-PHASE 0: READ CHECKLIST FIRST (MANDATORY!)
-═══════════════════════════════════════════════════════════════
-
-Before running ANY experiment, you MUST read reproduction_checklist.md to find:
-
-1. **Tool Detected**: conda, micromamba, mamba, pip, poetry, uv
-   - This tells you WHICH tool to use for running commands
-
-2. **Environment Name**: The name of the created environment
-   - Use this with the detected tool
-
-3. **Experiments Section**: Commands to run
-
-EXAMPLE from checklist:
-```
-**Tool Detected:** micromamba
-**Environment Name:** my_repo_env
-```
-
-Then use: `micromamba run -n my_repo_env python train.py`
-
-═══════════════════════════════════════════════════════════════
-ENVIRONMENT COMMAND PATTERNS (use the detected tool!)
-═══════════════════════════════════════════════════════════════
-
-Based on **Tool Detected** in checklist, use the correct pattern:
-
-**CONDA/MAMBA/MICROMAMBA**:
-  `[tool] run -n [env_name] python script.py`
-  Example: `micromamba run -n myenv python train.py`
-
-**PIP/VENV**:
-  `./venv/bin/python script.py`
-  OR `source venv/bin/activate && python script.py`
-
-**POETRY**:
-  `poetry run python script.py`
-
-**UV**:
-  `uv run python script.py`
-
-DO NOT guess the tool - READ THE CHECKLIST!
-
-═══════════════════════════════════════════════════════════════
-CRITICAL: BACKGROUND PROCESS PATTERN
-═══════════════════════════════════════════════════════════════
-
-For ANY training, evaluation, or long-running script:
-
-1. **start_background_process**(cmd, log_file, cwd="path/to/repo")
-2. **IMMEDIATELY CALL**: **wait_for_process**(pid, log_file, timeout=604800)
-3. **DO NOT STOP** until you have called wait_for_process
-
-NEVER use `execute_shell_command` for training scripts - it will timeout!
-
-═══════════════════════════════════════════════════════════════
-YOUR RESPONSIBILITIES
-═══════════════════════════════════════════════════════════════
-
-1. READ reproduction_checklist.md FIRST to find:
-   - Tool Detected (conda/micromamba/pip/etc.)
-   - Environment Name
-   - Experiment commands
-2. Check for existing results (skip if found)
-3. Run experiments using the CORRECT tool and background process pattern
-4. Monitor for errors and classify them
-5. Update checklist with experiment status
-
-═══════════════════════════════════════════════════════════════
-ERROR CLASSIFICATION
-═══════════════════════════════════════════════════════════════
-
-When experiments fail, classify the error:
-
-1. **ENVIRONMENT** errors (route to environment agent):
-   - ModuleNotFoundError
-   - ImportError
-   - Package version conflicts
-
-2. **DATA** errors (route to data_prep agent):
-   - FileNotFoundError for datasets
-   - Data format errors
-
-3. **EXECUTION** errors (retry with adjustments):
-   - CUDA out of memory → reduce batch_size
-   - Timeout → increase timeout or reduce epochs
-   - RuntimeError → check GPU availability
-
-Report errors clearly so the supervisor can route correctly.
-
-═══════════════════════════════════════════════════════════════
-RESOURCE-AWARE EXECUTION
-═══════════════════════════════════════════════════════════════
-
-{resource_instructions}
-
-═══════════════════════════════════════════════════════════════
-COMPLETION
-═══════════════════════════════════════════════════════════════
-
-When done, provide a summary:
-- Tool used: [from checklist]
-- Environment: [from checklist]
-- Experiments run: [list]
-- Success/Failure status: [each]
-- Output locations: [paths]
-- Any errors encountered: [classified]
-"""
+        from ..config.prompts import EXECUTION_AGENT_PROMPT
+        self.system_prompt = EXECUTION_AGENT_PROMPT
 
         self.tools = [
             read_file,
@@ -378,6 +266,16 @@ Start by reading the checklist to confirm tool, environment, and experiment list
             # Analyze result to determine success and extract errors
             success, details, error_info, last_message = self._analyze_result(result, code_path)
             if success:
+                # Store success in hierarchical context
+                if self.hierarchical_context:
+                    result_summary = str(details)[:500] if details else "Experiments completed"
+                    self.hierarchical_context.add(
+                        content=f"[Execution Success] {result_summary}",
+                        source="execution",
+                        entry_type="result",
+                        importance=1.0,
+                        lazy=True,  # Defer embedding to avoid loading SentenceTransformer
+                    )
                 return {
                     "experiments_completed": True,
                     "experiment_results": details,
@@ -389,6 +287,17 @@ Start by reading the checklist to confirm tool, environment, and experiment list
                 # Classify the error for routing
                 error_type = self._classify_error(error_info.get("error_message", ""))
                 failure_meta = self._create_failure_metadata(error_info, error_type, state)
+
+                # Store error in hierarchical context for recovery
+                if self.hierarchical_context:
+                    error_msg = error_info.get("error_message", "Unknown error")[:500]
+                    self.hierarchical_context.add(
+                        content=f"[Execution Error] Type: {error_type}\nMessage: {error_msg}",
+                        source="execution",
+                        entry_type="error",
+                        importance=0.9,
+                        lazy=True,  # Defer embedding to avoid loading SentenceTransformer
+                    )
 
                 return {
                     "experiments_completed": False,

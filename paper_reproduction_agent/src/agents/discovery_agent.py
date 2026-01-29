@@ -6,7 +6,7 @@ import requests
 from typing import Dict, List
 from pathlib import Path
 from datetime import datetime
-from .unified_paper_analyzer import UnifiedPaperAnalyzer
+
 
 
 class DiscoveryAgent:
@@ -263,29 +263,135 @@ class DiscoveryAgent:
         if not arxiv_id and not paper_title:
             print("   ⚠️  No arXiv ID or paper title available for enhanced discovery")
             return []
+            
+        from ..tools.code_search_tools import (
+            search_github_for_arxiv_reference,
+            search_github_by_paper_name,
+            web_search_for_implementation,
+        )
 
-        try:
-            # Requires LLM to be initialized
-            if not self.llm:
-                print("   ⚠️  LLM not initialized, skipping enhanced discovery")
-                return []
+        discovered_repos = []  # List of dicts with full metadata
+        discovered_urls = set()  # Track URLs to avoid duplicates
 
-            analyzer = UnifiedPaperAnalyzer(
-                self.llm, metrics_tracker=self.metrics_tracker
+        # Method 1: Search GitHub for repos that reference the arXiv paper
+        if arxiv_id:
+            print(
+                f"🔍 Method 1: Searching GitHub for repos referencing arXiv:{arxiv_id}..."
             )
-            discovered_repos = analyzer.enhanced_repo_discovery(
-                arxiv_id=arxiv_id, paper_title=paper_title, authors=authors
-            )
+            try:
+                arxiv_results = search_github_for_arxiv_reference(arxiv_id)
 
-            if discovered_repos:
-                print(
-                    f"✅ Enhanced discovery found {len(discovered_repos)} implementation(s)"
+                for result in arxiv_results:
+                    url = result.get("url")
+                    if (
+                        url
+                        and result.get("confidence") == "high"
+                        and url not in discovered_urls
+                    ):
+                        discovered_urls.add(url)
+                        discovered_repos.append(
+                            {
+                                "url": url,
+                                "match_file": result.get("match_file", "README"),
+                                "confidence": result.get("confidence", "high"),
+                                "stars": result.get(
+                                    "stars", 0
+                                ),  # Pass through star count
+                                "source": "arxiv_reference",
+                            }
+                        )
+                        stars = result.get("stars", 0)
+                        stars_str = f" [{stars:,} ⭐]" if stars else ""
+                        print(
+                            f"   ✅ Found: {url}{stars_str} (arXiv reference in {result.get('match_file', 'README')})"
+                        )
+
+            except Exception as e:
+                print(f"   ⚠️  GitHub arXiv search failed: {str(e)[:50]}")
+
+        # If we found high-confidence repos from arXiv search, return them
+        if discovered_repos:
+            print(
+                f"📚 Enhanced discovery found {len(discovered_repos)} repo(s) via arXiv reference"
+            )
+            return discovered_repos
+
+        # Method 2: Search GitHub by paper/method name
+        if paper_title:
+            print("🔍 Method 2: Searching GitHub for repos matching paper name...")
+            try:
+                name_results = search_github_by_paper_name(paper_title)
+
+                for result in name_results:
+                    url = result.get("url")
+                    if (
+                        url
+                        and result.get("is_exact_match")
+                        and url not in discovered_urls
+                    ):
+                        discovered_urls.add(url)
+                        discovered_repos.append(
+                            {
+                                "url": url,
+                                "matched_term": result.get("matched_term", ""),
+                                "confidence": result.get("confidence", "medium"),
+                                "stars": result.get(
+                                    "stars", 0
+                                ),  # Pass through star count
+                                "source": "name_match",
+                            }
+                        )
+                        term = result.get("matched_term", "")
+                        stars = result.get("stars", 0)
+                        stars_str = f" [{stars:,} ⭐]" if stars else ""
+                        print(f"   ✅ Found: {url}{stars_str} (name matches '{term}')")
+
+            except Exception as e:
+                print(f"   ⚠️  GitHub name search failed: {str(e)[:50]}")
+
+        # If we found repos from name search, return them
+        if discovered_repos:
+            print(
+                f"📚 Enhanced discovery found {len(discovered_repos)} repo(s) via name match"
+            )
+            return discovered_repos
+
+        # Method 3: Web search with LLM evaluation
+        if paper_title:
+            print("🌐 Method 3: Searching web for implementations...")
+            try:
+                web_results = web_search_for_implementation(
+                    paper_title=paper_title, arxiv_id=arxiv_id, authors=authors
                 )
-                return discovered_repos
-        except Exception as e:
-            print(f"⚠️  Enhanced discovery failed: {str(e)[:50]}")
 
-        return []
+                for result in web_results:
+                    url = result.get("url")
+                    if (
+                        url
+                        and result.get("confidence") == "high"
+                        and url not in discovered_urls
+                    ):
+                        discovered_urls.add(url)
+                        discovered_repos.append(
+                            {
+                                "url": url,
+                                "reason": result.get("reason", "LLM evaluation"),
+                                "confidence": result.get("confidence", "high"),
+                                "source": "web_search",
+                            }
+                        )
+                        reason = result.get("reason", "LLM evaluation")
+                        print(f"   ✅ Found: {url} ({reason[:50]})")
+
+            except Exception as e:
+                print(f"   ⚠️  Web search failed: {str(e)[:50]}")
+
+        if discovered_repos:
+            print(f"📚 Enhanced discovery found {len(discovered_repos)} repo(s)")
+        else:
+            print("📭 Enhanced discovery found no high-confidence repos")
+
+        return discovered_repos
 
     def _extract_response_text(self, response) -> str:
         """Extract text content from LLM response (handles various formats)."""
@@ -477,6 +583,8 @@ Answer (number only):"""
                 else []
             )
 
+            # Set a strict timeout to avoid hanging if provider is slow/down
+            # This allows falling back to heuristics rather than waiting 15+ mins
             response = self.llm.invoke(prompt, config={"callbacks": callbacks})
             response_text = self._extract_response_text(response)
 

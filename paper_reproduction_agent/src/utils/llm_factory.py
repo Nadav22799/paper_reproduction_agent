@@ -14,7 +14,7 @@ To use local vLLM:
 import os
 
 
-def create_llm(temperature: float = 0.3):
+def create_llm(temperature: float = 0.3, include_thoughts: bool = False):
     """
     Create LLM instance based on available API keys or local model.
 
@@ -122,7 +122,7 @@ def create_llm(temperature: float = 0.3):
 
             return ChatGoogleGenerativeAI(
                 model=model,
-                include_thoughts=True,
+                include_thoughts=include_thoughts,
                 google_api_key=google_key,
                 temperature=temperature,
             )
@@ -253,7 +253,7 @@ def get_available_providers() -> list:
     return providers
 
 
-def create_specific_llm(provider: str, temperature: float = 0.1):
+def create_specific_llm(provider: str, temperature: float = 0.1, include_thoughts: bool = False):
     """
     Create LLM for a specific provider.
 
@@ -282,6 +282,7 @@ def create_specific_llm(provider: str, temperature: float = 0.1):
             model=model,
             google_api_key=google_key,
             temperature=temperature,
+            include_thoughts=include_thoughts,
         )
 
     elif provider == "groq":
@@ -333,3 +334,146 @@ def create_specific_llm(provider: str, temperature: float = 0.1):
         raise ValueError(
             f"Unknown provider: {provider}. Use 'gemini', 'groq', 'openai', or 'anthropic'"
         )
+
+
+# === EMBEDDING PROVIDERS ===
+
+class GeminiEmbedder:
+    """Gemini API-based embedder matching SentenceTransformer interface.
+
+    Uses Google's text-embedding-004 model for fast, API-based embeddings.
+    No local model loading required - saves ~100MB RAM.
+    """
+
+    def __init__(self, model: str = None):
+        """Initialize Gemini embedder.
+
+        Args:
+            model: Embedding model name (default: from EMBEDDING_MODEL env var or text-embedding-004)
+        """
+        self.model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+        self._client = None
+
+    def _ensure_client(self):
+        """Lazy initialize the Gemini client."""
+        if self._client is None:
+            try:
+                import google.generativeai as genai
+                api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+                if not api_key:
+                    raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set")
+                genai.configure(api_key=api_key)
+                self._client = genai
+                print(f"🔗 Gemini embedder initialized with {self.model}")
+            except ImportError:
+                raise ImportError("google-generativeai not installed. Install with: pip install google-generativeai")
+        return self._client
+
+    def encode(self, text: str):
+        """Generate embedding for text.
+
+        Args:
+            text: Text to embed
+
+        Returns:
+            List[float]: Embedding vector (768 dimensions for text-embedding-004)
+        """
+        import numpy as np
+        genai = self._ensure_client()
+
+        try:
+            result = genai.embed_content(
+                model=f"models/{self.model}",
+                content=text,
+                task_type="retrieval_document"
+            )
+            # Return as numpy array to match SentenceTransformer interface
+            return np.array(result['embedding'])
+        except Exception as e:
+            print(f"⚠️  Gemini embedding failed: {e}")
+            raise
+
+
+class OpenAIEmbedder:
+    """OpenAI API-based embedder matching SentenceTransformer interface."""
+
+    def __init__(self, model: str = None):
+        """Initialize OpenAI embedder.
+
+        Args:
+            model: Embedding model name (default: text-embedding-3-small)
+        """
+        self.model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        self._client = None
+
+    def _ensure_client(self):
+        """Lazy initialize the OpenAI client."""
+        if self._client is None:
+            try:
+                from openai import OpenAI
+                api_key = os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    raise ValueError("OPENAI_API_KEY not set")
+                self._client = OpenAI(api_key=api_key)
+                print(f"🔗 OpenAI embedder initialized with {self.model}")
+            except ImportError:
+                raise ImportError("openai not installed. Install with: pip install openai")
+        return self._client
+
+    def encode(self, text: str):
+        """Generate embedding for text.
+
+        Args:
+            text: Text to embed
+
+        Returns:
+            List[float]: Embedding vector
+        """
+        import numpy as np
+        client = self._ensure_client()
+
+        try:
+            response = client.embeddings.create(
+                model=self.model,
+                input=text
+            )
+            return np.array(response.data[0].embedding)
+        except Exception as e:
+            print(f"⚠️  OpenAI embedding failed: {e}")
+            raise
+
+
+def create_embedder(provider: str = None):
+    """Create embedder based on provider setting.
+
+    Args:
+        provider: "gemini", "openai", "local", or "none"
+                  Defaults to EMBEDDING_PROVIDER env var or "gemini"
+
+    Returns:
+        Embedder with .encode(text) -> np.array method, or None if provider is "none"
+    """
+    provider = (provider or os.getenv("EMBEDDING_PROVIDER", "gemini")).lower()
+
+    if provider == "none":
+        print("📭 Embeddings disabled (EMBEDDING_PROVIDER=none)")
+        return None
+
+    if provider == "gemini":
+        return GeminiEmbedder()
+
+    if provider == "openai":
+        return OpenAIEmbedder()
+
+    if provider == "local":
+        try:
+            from sentence_transformers import SentenceTransformer
+            model = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+            print(f"🔗 Loading local embedding model: {model}")
+            return SentenceTransformer(model)
+        except ImportError:
+            print("⚠️  sentence-transformers not installed, falling back to Gemini")
+            return GeminiEmbedder()
+
+    print(f"⚠️  Unknown embedding provider '{provider}', using Gemini")
+    return GeminiEmbedder()

@@ -163,12 +163,15 @@ class PaperReproductionOrchestrator:
         from .agents.environment_setup_agent import EnvironmentSetupAgent
         from .agents.unified_reproduction_agent import UnifiedReproductionAgent
         from .agents.discovery_agent import DiscoveryAgent
-        from .utils.llm_factory import create_llm
+        from .utils.llm_factory import create_llm, create_embedder
         from .utils.file_logger import FileLogger
         from .utils.logging_callback import LoggingCallbackHandler
         from .config import ReproductionConfig
 
         self.llm = llm or create_llm(temperature=0.1)
+        # Create a specialized "Reasoning LLM" with chain-of-thought enabled (if supported)
+        # This is used for complex agents like Supervisor and Planner
+        self.reasoning_llm = create_llm(temperature=0.3, include_thoughts=True)
         self.config = ReproductionConfig()
 
         # Determine which architecture to use
@@ -213,11 +216,15 @@ class PaperReproductionOrchestrator:
             )
             print("💾 Checkpoint system enabled")
 
+        # Initialize embedder using factory (API-based by default for speed)
+        embedder = create_embedder()  # Uses EMBEDDING_PROVIDER env var (default: gemini)
+
         # Initialize shared hierarchical context manager for cross-agent context
         self.hierarchical_context = HierarchicalContextManager(
             model_name="gpt-4",
             hot_capacity=50,
             max_tokens=100000,  # Larger budget for orchestrator
+            embedder=embedder,  # Use factory-created embedder (API or local)
         )
         print("🧠 Hierarchical context manager initialized")
 
@@ -255,23 +262,37 @@ class PaperReproductionOrchestrator:
         from .agents.validation_agent import ValidationAgent
 
         self.supervisor_agent = SupervisorAgent(
-            self.llm, metrics_tracker=self.metrics_tracker
+            self.reasoning_llm,  # Use Thinking Mode for complex routing
+            metrics_tracker=self.metrics_tracker,
+            hierarchical_context=self.hierarchical_context,
         )
         self.planning_agent = PlanningAgent(
-            self.llm, max_iterations=30, metrics_tracker=self.metrics_tracker
+            self.reasoning_llm,  # Use Thinking Mode for detailed planning
+            max_iterations=30,
+            metrics_tracker=self.metrics_tracker,
+            hierarchical_context=self.hierarchical_context,
         )
         self.critic_agent = CriticAgent(
             metrics_tracker=self.metrics_tracker,
             enable_llm_critic=self.config.enable_llm_critic
         )
         self.data_prep_agent = DataPrepAgent(
-            self.llm, max_iterations=50, metrics_tracker=self.metrics_tracker
+            self.llm,
+            max_iterations=50,
+            metrics_tracker=self.metrics_tracker,
+            hierarchical_context=self.hierarchical_context,
         )
         self.execution_agent = ExecutionAgent(
-            self.llm, max_iterations=50, metrics_tracker=self.metrics_tracker
+            self.llm,
+            max_iterations=50,
+            metrics_tracker=self.metrics_tracker,
+            hierarchical_context=self.hierarchical_context,
         )
         self.validation_agent = ValidationAgent(
-            self.llm, max_iterations=30, metrics_tracker=self.metrics_tracker
+            self.llm,
+            max_iterations=30,
+            metrics_tracker=self.metrics_tracker,
+            hierarchical_context=self.hierarchical_context,
         )
 
     def _build_workflow(self) -> StateGraph:
@@ -1028,6 +1049,7 @@ class PaperReproductionOrchestrator:
                     source="paper_analyzer",
                     entry_type="result",
                     importance=1.0,
+                    lazy=True,  # Defer embedding generation for speed
                 )
 
             # Store datasets
@@ -1038,6 +1060,7 @@ class PaperReproductionOrchestrator:
                     source="paper_analyzer",
                     entry_type="result",
                     importance=0.9,
+                    lazy=True,
                 )
 
             # Store metrics to reproduce
@@ -1059,6 +1082,7 @@ class PaperReproductionOrchestrator:
                             source="paper_analyzer",
                             entry_type="result",
                             importance=1.0,
+                            lazy=True,
                         )
 
             # Store code references
@@ -1076,6 +1100,7 @@ class PaperReproductionOrchestrator:
                     source="paper_analyzer",
                     entry_type="result",
                     importance=0.8,
+                    lazy=True,
                 )
 
             print("   🧠 Stored paper context in hierarchical storage")
@@ -1386,6 +1411,7 @@ class PaperReproductionOrchestrator:
                 source="environment_setup",
                 entry_type="result",
                 importance=0.8,
+                lazy=True,  # Defer embedding to avoid loading SentenceTransformer
             )
         else:
             state["messages"].append("❌ Environment setup failed")
@@ -1518,6 +1544,11 @@ class PaperReproductionOrchestrator:
             )
 
         paper_context = "\n".join(paper_context_parts)
+
+        # FLUSH DEFERRED EMBEDDINGS BEFORE SUPERVISOR/REPRODUCTION STARTS
+        if self.hierarchical_context:
+            print("   🧠 Flushing deferred context embeddings...")
+            self.hierarchical_context.flush_embeddings()
 
         # Run unified reproduction
         result = self.unified_reproducer.reproduce(
@@ -2091,6 +2122,11 @@ class PaperReproductionOrchestrator:
                 "completed_phases", []
             ),  # Track completed phases for resume
             "phase_status": state.get("phase_status", {}),  # Track detailed phase status
+            # Hierarchical context state for cross-agent knowledge preservation
+            "hierarchical_context_state": (
+                self.hierarchical_context.to_dict()
+                if self.hierarchical_context else None
+            ),
         }
 
         self.checkpoint_manager.save(
@@ -2415,6 +2451,20 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
             if repo_path and repo_path != state.get("implementation_path"):
                 print(f"   🔄 Updating implementation path to current: {repo_path}")
                 state["implementation_path"] = repo_path
+
+            # Restore hierarchical context if available
+            hierarchical_state = state.pop("hierarchical_context_state", None)
+            if hierarchical_state and self.hierarchical_context:
+                try:
+                    self.hierarchical_context = HierarchicalContextManager.from_dict(
+                        hierarchical_state
+                    )
+                    stats = self.hierarchical_context.get_stats()
+                    print(f"   🧠 Restored hierarchical context: "
+                          f"hot={stats['hot_entries']}, cold={stats['cold_summaries']}")
+                except Exception as e:
+                    print(f"   ⚠️ Failed to restore hierarchical context: {e}")
+                    # Continue with fresh context - non-fatal
 
             completed_phases = state.get("completed_phases", [])
 

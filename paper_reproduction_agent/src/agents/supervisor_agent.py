@@ -9,20 +9,28 @@ sub-agent should handle the current task based on:
 
 from typing import Dict, Optional
 from ..utils.llm_factory import create_llm
+from ..utils.hierarchical_context import HierarchicalContextManager
 
 
 class SupervisorAgent:
     """Coordinates sub-agents and handles failure routing in the cyclic state machine."""
 
-    def __init__(self, llm=None, metrics_tracker=None):
+    def __init__(
+        self,
+        llm=None,
+        metrics_tracker=None,
+        hierarchical_context: HierarchicalContextManager = None,
+    ):
         """Initialize the Supervisor Agent.
 
         Args:
             llm: Language model for complex routing decisions
             metrics_tracker: Optional metrics tracker for observability
+            hierarchical_context: Shared context manager for cross-agent knowledge
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.metrics_tracker = metrics_tracker
+        self.hierarchical_context = hierarchical_context
 
     def decide_next_agent(self, state: Dict) -> Dict:
         """Determine which agent should handle the current state.
@@ -88,8 +96,46 @@ class SupervisorAgent:
         # All phases complete
         return {"agent": "complete", "directive": "All phases complete - generate final report"}
 
+    def _get_relevant_context(self, query: str, max_entries: int = 5) -> str:
+        """Query hierarchical context for relevant historical information.
+
+        Args:
+            query: Query string for semantic search
+            max_entries: Maximum entries to return
+
+        Returns:
+            Formatted context string
+        """
+        if not self.hierarchical_context:
+            return ""
+
+        try:
+            relevant = self.hierarchical_context.retrieve(
+                query=query,
+                max_tokens=2000,  # Small budget for supervisor decisions
+                min_relevance=0.3,  # Only relevant entries
+            )
+
+            if not relevant:
+                return ""
+
+            sections = []
+            for r in relevant[:max_entries]:
+                source = r.get("source", "context")
+                entry_type = r.get("type", "")
+                content = r.get("content", "")[:200]  # Truncate for brevity
+                sections.append(f"[{source}/{entry_type}] {content}")
+
+            return "\n".join(sections)
+        except Exception as e:
+            print(f"   ⚠️ Context query failed: {e}")
+            return ""
+
     def _route_failure(self, state: Dict) -> Dict:
         """Route based on error classification for targeted recovery.
+
+        Uses hierarchical context to check past errors and avoid repeating
+        failed recovery strategies.
 
         Args:
             state: Current state with failure_metadata
@@ -103,6 +149,21 @@ class SupervisorAgent:
         retry_count = failure.get("retry_count", 0)
         attempted_fixes = failure.get("attempted_fixes", [])
         max_retries = state.get("max_recovery_attempts", 3)
+
+        # Query context for similar past errors
+        past_errors = self._get_relevant_context(f"error {error_type} {error_message[:100]}")
+        if past_errors:
+            print(f"   🧠 Found relevant past context for error recovery")
+
+        # Store this error in context for future reference
+        if self.hierarchical_context:
+            self.hierarchical_context.add(
+                content=f"[Routing] Error: {error_type} - {error_message[:300]}. Retry #{retry_count + 1}",
+                source="supervisor",
+                entry_type="error",
+                importance=0.8,
+                lazy=True,  # Defer embedding to avoid loading SentenceTransformer
+            )
 
         # Check if we've exceeded max retries
         if retry_count >= max_retries:
@@ -122,13 +183,20 @@ class SupervisorAgent:
                 "context": failure,
             }
 
-        # Build context for the target agent
+        # Build context for the target agent with historical knowledge
         context = {
             "error": error_message,
             "previous_attempts": attempted_fixes,
             "retry_number": retry_count + 1,
             "hints": failure.get("recovery_hints", []),
         }
+
+        # Add relevant historical context if available
+        if past_errors:
+            context["historical_context"] = past_errors
+            # Check if similar error was seen before and what worked
+            if "success" in past_errors.lower():
+                print("   💡 Found successful recovery pattern in history")
 
         # Route based on error type
         if error_type == "environment":

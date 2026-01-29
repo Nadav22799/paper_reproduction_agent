@@ -51,6 +51,12 @@ Thank you for your interest in contributing to the **Paper Reproduction Agent**!
     Ensure all tests pass.
     ```bash
     pytest
+54: 
+55: 5.  **Agentic Verification**:
+56:     For workflow changes, run the verification set:
+57:     ```bash
+58:     python src/cli.py verify
+59:     ```
     ```
 
 ## 📝 Pull Request Process

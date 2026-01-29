@@ -20,20 +20,27 @@
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture: Supervisor Multi-Agent System
 
 ```mermaid
 graph TD
-    A[User Input: arXiv ID] --> B(Analyzer Agent);
-    B --> C{Code Exists?};
-    C -- Yes --> D(Clone & Inspect);
-    C -- No --> E(Code From Scratch);
-    D --> F(Environment Setup Agent);
-    F -- "Fixes Deps" --> F;
-    F --> G(Reproduction Agent);
-    G --> H(Verification Agent);
-    H --> I[Final Report & Artifacts];
+    A[User Input] --> B(Supervisor Agent);
+    B --> C{Decision};
+    C -- "Planning" --> D(Planning Agent);
+    C -- "Setup" --> E(Environment Agent);
+    C -- "Execute" --> F(Critic Agent);
+    F -- "Approved" --> G(Execution Agent);
+    F -- "Blocked" --> B;
+    E -- "Error" --> B;
+    B --> G; 
+    G --> H(Validation Agent);
+    H --> I[Final Report];
 ```
+
+**Core Components:**
+*   **Supervisor Agent** (`src/agents/supervisor_agent.py`): The brain of the system. Uses hierarchical context to route tasks and handle failures cyclically.
+*   **Orchestrator** (`src/orchestrator.py`): Manages the state graph (LangGraph) and passes control between agents.
+*   **Critic Agent**: Intercepts potentially dangerous actions (e.g., file deletion) before execution.
 
 ---
 
@@ -69,6 +76,7 @@ We rigorously test this agent against a "Challenge Dataset" of papers known for 
 | Paper ID | Domain | Challenge | Status | Variance |
 | :--- | :--- | :--- | :--- | :--- |
 | **[2406.03386] NeuralWalker** | GNNs | Scale & OOM | ✅ Success | $\pm$ 0.0004 |
+| **[1609.02907] GCN** | GNNs | Legacy Debt (2016) | ✅ Success | Matched (1/1) |
 | **[1810.04805] BERT** | NLP | Code Rot (2018) | ⏳ Testing | - |
 
 *See [BENCHMARK.md](BENCHMARK.md) for full scientific audit details.*

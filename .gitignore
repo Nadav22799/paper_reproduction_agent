@@ -29,11 +29,14 @@ venv/
 env/
 ENV/
 .venv
+paper_reproduction/
 
 # Package Manager Executables
 micromamba.exe
 miniconda.sh
 Miniforge3-Windows-x86_64.exe
+Python-*/
+Python-*.tgz
 
 # Project Specific
 **/MagicMoke/
@@ -52,9 +55,7 @@ Miniforge3-Windows-x86_64.exe
 # Runtime Directories (created during paper reproduction)
 # ============================================================================
 # Cloned repositories (each paper's implementation gets cloned here)
-cloned_repo/*
-!cloned_repo/README.md
-!cloned_repo/.gitkeep
+cloned_repo/
 
 # Downloaded papers and datasets (anywhere in project)
 downloads/*
@@ -143,3 +144,5 @@ Thumbs.db
 # Don't ignore .gitkeep files (used to preserve empty directory structure)
 !.gitkeep
 !**/.gitkeep
+
+bin/

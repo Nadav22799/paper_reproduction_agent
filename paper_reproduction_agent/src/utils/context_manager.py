@@ -727,3 +727,46 @@ Continue from where you left off. Check current state before proceeding.
             "total_chars": total_tokens * 4,  # Approximate
             "chars_remaining": (self.max_tokens - total_tokens) * 4,
         }
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize manager state to dictionary for checkpoint saving.
+
+        Returns:
+            Dictionary containing serializable state
+        """
+        return {
+            "max_tokens": self.max_tokens,
+            "sliding_window_size": self.sliding_window_size,
+            "model_name": self.model_name,
+            "seen_errors": list(self.seen_errors),
+            "error_summaries": list(self.error_summaries),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ContextManager":
+        """
+        Restore manager state from dictionary.
+
+        Args:
+            data: Dictionary from to_dict()
+
+        Returns:
+            Restored ContextManager instance
+        """
+        manager = cls(
+            max_tokens=data.get("max_tokens", 50000),
+            sliding_window_size=data.get("sliding_window_size", 2),
+            model_name=data.get("model_name", "gpt-4"),
+        )
+
+        manager.seen_errors = set(data.get("seen_errors", []))
+        manager.error_summaries = list(data.get("error_summaries", []))
+
+        logger.debug(
+            f"Restored ContextManager: "
+            f"seen_errors={len(manager.seen_errors)}, "
+            f"error_summaries={len(manager.error_summaries)}"
+        )
+
+        return manager

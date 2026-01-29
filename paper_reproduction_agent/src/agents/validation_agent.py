@@ -20,87 +20,34 @@ from ..tools.code_execution_tools import (
     write_file,
 )
 from ..utils.llm_factory import create_llm
+from ..utils.hierarchical_context import HierarchicalContextManager
 
 
 class ValidationAgent:
     """Verifies experiment results against paper claims using code-first approach."""
 
-    def __init__(self, llm=None, max_iterations: int = 30, metrics_tracker=None):
+    def __init__(
+        self,
+        llm=None,
+        max_iterations: int = 30,
+        metrics_tracker=None,
+        hierarchical_context: HierarchicalContextManager = None,
+    ):
         """Initialize the Validation Agent.
 
         Args:
             llm: Language model to use
             max_iterations: Maximum iterations for the ReAct agent
             metrics_tracker: Optional metrics tracker for observability
+            hierarchical_context: Shared context manager for cross-agent knowledge
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
+        self.hierarchical_context = hierarchical_context
 
-        self.system_prompt = """You are a Verification Specialist for ML paper reproduction.
-
-GOAL: VERIFY REPRODUCTION RESULTS
-You need to confirm if the experiment results match the paper's claims.
-
-═══════════════════════════════════════════════════════════════
-YOUR WORKFLOW
-═══════════════════════════════════════════════════════════════
-
-1. **LOCATE CONTEXT**:
-   - Find and read `reproduction_checklist.md`.
-   - The user provided path might be wrong. Use `search_file` if needed.
-   - Extract expected metrics and ANY ACTUAL results already recorded there (e.g. in "Experiments" section).
-
-2. **LOCATE EVIDENCE**:
-   - If results are NOT in the checklist, find the result files.
-   - They could be `.log`, `.json`, `.csv` or `.txt`.
-   - Use `list_directory` and `search_file` to find them. Do not guess paths.
-
-3. **VERIFY & REPORT**:
-   - Use `execute_python_code` to parse files and compare values.
-   - Calculate relative error (Target < 5%).
-   - **CRITICAL SUCCESS LOGIC**:
-     - **Primary Metrics** (Accuracy, F1, Score, Loss): MUST MATCH.
-     - **Secondary Metrics** (Time, Memory, Epochs): Informational only. DO NOT include them in the Markdown table.
-     - If Primary Metric matches, count the Experiment as PASSED.
-     - Do NOT mark the experiment as failed just because Training Time didn't match.
-
-   - **SUCCESS RATIO CALCULATION (n/N)**:
-     - `N` = Total count of expected **Primary Metrics** across all experiments.
-       - If Single mode: N = count of primary metrics in the one experiment (e.g., 1 for Accuracy, or 2 if F1 & Accuracy).
-       - If Full mode: N = sum of primary metrics across all experiments.
-     - `n` = Total count of matching **Primary Metrics**.
-     - **REPORT OUTPUT**:
-       - You MUST include the line: `Match Ratio: n/N` (e.g., "Match Ratio: 1/1" or "Match Ratio: 2/3").
-       
-═══════════════════════════════════════════════════════════════
-TOOLS
-═══════════════════════════════════════════════════════════════
-- `read_file(path)`: Read file content.
-- `search_file(pattern, path)`: Find files matching a pattern.
-- `execute_python_code(code)`: Run Python to parse/calculate.
-- `list_directory(path)`: See folder contents.
-
-═══════════════════════════════════════════════════════════════
-OUTPUT FORMAT
-═══════════════════════════════════════════════════════════════
-
-Report format (YOU MUST OUTPUT THIS):
-```
-VERIFICATION RESULTS
-====================
-Primary Metric Matched: YES/NO
-Secondary Metrics Matched: X/Y (Informational) 
-Overall Status: ✅ PASSED / ❌ FAILED
-
-| Metric      | Expected | Actual | Error   | Status |
-|-------------|----------|--------|---------|--------|
-| Accuracy    | 95.5     | 94.8   | 0.73%   | ✅     |
-| F1 Score    | 0.92     | 0.85   | 7.6%    | ❌     |
-```
-
-Then update the `reproduction_checklist.md` verification section.
-"""
+        from ..config.prompts import VALIDATION_AGENT_PROMPT
+        self.system_prompt = VALIDATION_AGENT_PROMPT
 
         self.tools = [
             read_file,
