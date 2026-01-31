@@ -13,6 +13,7 @@ import json
 from datetime import datetime
 from typing import Dict, List, Tuple
 from langchain_google_genai import ChatGoogleGenerativeAI
+from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class CriticAgent:
@@ -271,7 +272,14 @@ Respond with ONLY one of:
 
         try:
             llm = self._get_llm()
-            response = llm.invoke(prompt)
+            # Use callbacks for metrics tracking if available
+            callbacks = []
+            if self.metrics_tracker:
+                callbacks.append(LoggingCallbackHandler(
+                    verbose=False,  # Quiet mode for critic
+                    metrics_tracker=self.metrics_tracker
+                ))
+            response = llm.invoke(prompt, config={"callbacks": callbacks} if callbacks else None)
             result_text = response.content.strip()
 
             if result_text.startswith("DANGEROUS:"):

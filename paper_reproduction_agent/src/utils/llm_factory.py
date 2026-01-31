@@ -345,14 +345,16 @@ class GeminiEmbedder:
     No local model loading required - saves ~100MB RAM.
     """
 
-    def __init__(self, model: str = None):
+    def __init__(self, model: str = None, metrics_tracker=None):
         """Initialize Gemini embedder.
 
         Args:
             model: Embedding model name (default: from EMBEDDING_MODEL env var or text-embedding-004)
+            metrics_tracker: Optional MetricsTracker for token tracking
         """
         self.model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-004")
         self._client = None
+        self.metrics_tracker = metrics_tracker
 
     def _ensure_client(self):
         """Lazy initialize the Gemini client."""
@@ -387,6 +389,10 @@ class GeminiEmbedder:
                 content=text,
                 task_type="retrieval_document"
             )
+            # Track tokens (Gemini API doesn't return token count, estimate from text)
+            if self.metrics_tracker and hasattr(self.metrics_tracker, "record_embedding_tokens"):
+                estimated_tokens = len(text) // 4  # Rough estimate: ~4 chars per token
+                self.metrics_tracker.record_embedding_tokens(estimated_tokens)
             # Return as numpy array to match SentenceTransformer interface
             return np.array(result['embedding'])
         except Exception as e:
@@ -397,14 +403,16 @@ class GeminiEmbedder:
 class OpenAIEmbedder:
     """OpenAI API-based embedder matching SentenceTransformer interface."""
 
-    def __init__(self, model: str = None):
+    def __init__(self, model: str = None, metrics_tracker=None):
         """Initialize OpenAI embedder.
 
         Args:
             model: Embedding model name (default: text-embedding-3-small)
+            metrics_tracker: Optional MetricsTracker for token tracking
         """
         self.model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
         self._client = None
+        self.metrics_tracker = metrics_tracker
 
     def _ensure_client(self):
         """Lazy initialize the OpenAI client."""
@@ -437,18 +445,23 @@ class OpenAIEmbedder:
                 model=self.model,
                 input=text
             )
+            # Track tokens using actual usage from response
+            if self.metrics_tracker and hasattr(self.metrics_tracker, "record_embedding_tokens"):
+                if hasattr(response, "usage") and response.usage:
+                    self.metrics_tracker.record_embedding_tokens(response.usage.total_tokens)
             return np.array(response.data[0].embedding)
         except Exception as e:
             print(f"⚠️  OpenAI embedding failed: {e}")
             raise
 
 
-def create_embedder(provider: str = None):
+def create_embedder(provider: str = None, metrics_tracker=None):
     """Create embedder based on provider setting.
 
     Args:
         provider: "gemini", "openai", "local", or "none"
                   Defaults to EMBEDDING_PROVIDER env var or "gemini"
+        metrics_tracker: Optional MetricsTracker for token tracking
 
     Returns:
         Embedder with .encode(text) -> np.array method, or None if provider is "none"
@@ -460,20 +473,21 @@ def create_embedder(provider: str = None):
         return None
 
     if provider == "gemini":
-        return GeminiEmbedder()
+        return GeminiEmbedder(metrics_tracker=metrics_tracker)
 
     if provider == "openai":
-        return OpenAIEmbedder()
+        return OpenAIEmbedder(metrics_tracker=metrics_tracker)
 
     if provider == "local":
         try:
             from sentence_transformers import SentenceTransformer
             model = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
             print(f"🔗 Loading local embedding model: {model}")
+            # Note: SentenceTransformer doesn't support metrics_tracker natively
             return SentenceTransformer(model)
         except ImportError:
             print("⚠️  sentence-transformers not installed, falling back to Gemini")
-            return GeminiEmbedder()
+            return GeminiEmbedder(metrics_tracker=metrics_tracker)
 
     print(f"⚠️  Unknown embedding provider '{provider}', using Gemini")
-    return GeminiEmbedder()
+    return GeminiEmbedder(metrics_tracker=metrics_tracker)

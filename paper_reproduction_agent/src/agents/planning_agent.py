@@ -24,6 +24,7 @@ from ..tools.file_utils import (
 from langchain_community.tools import DuckDuckGoSearchRun
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
+from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class PlanningAgent:
@@ -187,6 +188,11 @@ After creating the checklist, respond with a summary of what you found.
             DuckDuckGoSearchRun(),
         ]
 
+        print("\n" + "=" * 60)
+        print("Planning Agent Initialized")
+        print(f"   Max Iterations: {max_iterations}")
+        print("=" * 60)
+
     def create_plan(self, state: Dict) -> Dict:
         """Create initial reproduction plan from README analysis.
 
@@ -308,10 +314,25 @@ Start by listing the repository contents."""
             prompt=self.system_prompt,
         )
 
+        # Prepare callbacks for logging and metrics
+        callbacks = []
+        if self.metrics_tracker:
+            callbacks.append(LoggingCallbackHandler(
+                verbose=True,
+                metrics_tracker=self.metrics_tracker
+            ))
+
+        print("\n" + "-" * 60)
+        print(f"Planning Agent: Creating checklist for {code_path}")
+        print("-" * 60)
+
         try:
+            config = {"recursion_limit": self.max_iterations}
+            if callbacks:
+                config["callbacks"] = callbacks
             result = agent.invoke(
                 {"messages": [HumanMessage(content=planning_prompt)]},
-                {"recursion_limit": self.max_iterations},
+                config,
             )
 
             # Extract last_message for reasoning output

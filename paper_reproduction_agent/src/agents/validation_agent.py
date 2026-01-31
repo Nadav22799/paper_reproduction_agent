@@ -21,6 +21,7 @@ from ..tools.code_execution_tools import (
 )
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
+from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class ValidationAgent:
@@ -56,6 +57,11 @@ class ValidationAgent:
             execute_python_code,
             write_file,
         ]
+
+        print("\n" + "=" * 60)
+        print("Validation Agent Initialized")
+        print(f"   Max Iterations: {max_iterations}")
+        print("=" * 60)
 
     def verify_results(self, state: Dict) -> Dict:
         """Verify experiment results against paper claims.
@@ -111,14 +117,30 @@ Task:
             prompt=self.system_prompt,
         )
 
+        # Prepare callbacks for logging and metrics
+        callbacks = []
+        if self.metrics_tracker:
+            callbacks.append(LoggingCallbackHandler(
+                verbose=True,
+                metrics_tracker=self.metrics_tracker
+            ))
+
+        print("\n" + "-" * 60)
+        print(f"Validation Agent: Verifying results for {code_path}")
+        print("-" * 60)
+
         try:
             # Stream the agent's execution to provide visibility
             print("   💭 Validation verification plan:")
-            
+
+            config = {"recursion_limit": self.max_iterations}
+            if callbacks:
+                config["callbacks"] = callbacks
+
             all_messages = []  # Collect all messages for analysis
             for event in agent.stream(
                 {"messages": [HumanMessage(content=verification_prompt)]},
-                {"recursion_limit": self.max_iterations}
+                config
             ):
                 # Collect messages from both agent and tools events
                 if "agent" in event and "messages" in event["agent"]:

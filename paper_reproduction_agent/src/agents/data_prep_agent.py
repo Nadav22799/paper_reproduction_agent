@@ -21,6 +21,7 @@ from ..tools.code_execution_tools import (
 )
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
+from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class DataPrepAgent:
@@ -56,6 +57,11 @@ class DataPrepAgent:
             execute_python_code,
             search_error_solution,
         ]
+
+        print("\n" + "=" * 60)
+        print("Data Preparation Agent Initialized")
+        print(f"   Max Iterations: {max_iterations}")
+        print("=" * 60)
 
     def prepare_data(self, state: Dict) -> Dict:
         """Prepare datasets for experiments.
@@ -122,10 +128,25 @@ Start by analyzing the provided context."""
             prompt=self.system_prompt,
         )
 
+        # Prepare callbacks for logging and metrics
+        callbacks = []
+        if self.metrics_tracker:
+            callbacks.append(LoggingCallbackHandler(
+                verbose=True,
+                metrics_tracker=self.metrics_tracker
+            ))
+
+        print("\n" + "-" * 60)
+        print(f"Data Prep Agent: Starting data preparation for {code_path}")
+        print("-" * 60)
+
         try:
+            config = {"recursion_limit": self.max_iterations}
+            if callbacks:
+                config["callbacks"] = callbacks
             result = agent.invoke(
                 {"messages": [HumanMessage(content=data_prompt)]},
-                {"recursion_limit": self.max_iterations},
+                config,
             )
 
             # Analyze result to determine success

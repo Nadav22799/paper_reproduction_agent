@@ -27,6 +27,7 @@ from ..tools.code_execution_tools import (
 from ..utils.llm_factory import create_llm
 from ..utils.resource_detector import detect_system_resources, get_experiment_strategy
 from ..utils.hierarchical_context import HierarchicalContextManager
+from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class ExecutionAgent:
@@ -70,6 +71,12 @@ class ExecutionAgent:
             stop_process,
             search_error_solution,
         ]
+
+        print("\n" + "=" * 60)
+        print("Execution Agent Initialized")
+        print(f"   Max Iterations: {max_iterations}")
+        print(f"   Strategy: {self.experiment_strategy}")
+        print("=" * 60)
 
     def run_experiments(self, state: Dict) -> Dict:
         """Run experiments from the checklist.
@@ -257,10 +264,25 @@ Start by reading the checklist to confirm tool, environment, and experiment list
             prompt=full_prompt,
         )
 
+        # Prepare callbacks for logging and metrics
+        callbacks = []
+        if self.metrics_tracker:
+            callbacks.append(LoggingCallbackHandler(
+                verbose=True,
+                metrics_tracker=self.metrics_tracker
+            ))
+
+        print("\n" + "-" * 60)
+        print(f"Execution Agent: Starting experiment execution for {code_path}")
+        print("-" * 60)
+
         try:
+            config = {"recursion_limit": self.max_iterations * 3}
+            if callbacks:
+                config["callbacks"] = callbacks
             result = agent.invoke(
                 {"messages": [HumanMessage(content=execution_prompt)]},
-                {"recursion_limit": self.max_iterations * 3},
+                config,
             )
 
             # Analyze result to determine success and extract errors

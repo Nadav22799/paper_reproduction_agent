@@ -217,7 +217,7 @@ class PaperReproductionOrchestrator:
             print("💾 Checkpoint system enabled")
 
         # Initialize embedder using factory (API-based by default for speed)
-        embedder = create_embedder()  # Uses EMBEDDING_PROVIDER env var (default: gemini)
+        embedder = create_embedder(metrics_tracker=self.metrics_tracker)  # Uses EMBEDDING_PROVIDER env var (default: gemini)
 
         # Initialize shared hierarchical context manager for cross-agent context
         self.hierarchical_context = HierarchicalContextManager(

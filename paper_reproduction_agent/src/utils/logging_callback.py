@@ -148,8 +148,40 @@ class LoggingCallbackHandler(BaseCallbackHandler):
 
         if input_tokens or output_tokens:
             self.metrics_tracker.record_tokens(input_tokens, output_tokens)
-            return True
-        return False
+
+        # Extract reasoning tokens from multiple provider formats
+        reasoning_tokens = 0
+
+        # Gemini format (with include_thoughts=True)
+        output_token_details = usage.get("output_token_details", {})
+        if isinstance(output_token_details, dict):
+            reasoning_tokens = output_token_details.get("reasoning", 0) or 0
+
+        # OpenAI o1/o3 and Anthropic format
+        if not reasoning_tokens:
+            reasoning_tokens = usage.get("reasoning_tokens", 0) or 0
+
+        if reasoning_tokens and hasattr(self.metrics_tracker, "record_reasoning_tokens"):
+            self.metrics_tracker.record_reasoning_tokens(reasoning_tokens)
+
+        # Extract cache tokens from multiple provider formats
+        cache_creation = 0
+        cache_read = 0
+
+        # Gemini format
+        input_token_details = usage.get("input_token_details", {})
+        if isinstance(input_token_details, dict):
+            cache_read = input_token_details.get("cache_read", 0) or 0
+
+        # Anthropic/Claude format
+        if not cache_read:
+            cache_read = usage.get("cache_read_input_tokens", 0) or 0
+        cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+
+        if (cache_creation or cache_read) and hasattr(self.metrics_tracker, "record_cache_tokens"):
+            self.metrics_tracker.record_cache_tokens(cache_creation, cache_read)
+
+        return bool(input_tokens or output_tokens)
 
     def on_llm_error(self, error: Exception, **kwargs) -> None:
         """Run when LLM errors."""

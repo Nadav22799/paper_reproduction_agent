@@ -45,9 +45,16 @@ class WorkflowMetrics:
     total_llm_tokens_input: int = 0
     total_llm_tokens_output: int = 0
 
+    # Additional token tracking
+    total_embedding_tokens: int = 0
+    total_reasoning_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
+
     # Cost rates (per 1M tokens) - configurable
     input_cost_per_million: float = 3.00  # Default: GPT-4 Turbo input
     output_cost_per_million: float = 15.00  # Default: GPT-4 Turbo output
+    embedding_cost_per_million: float = 0.10  # Default: OpenAI ada-002
 
 
 class MetricsTracker:
@@ -81,6 +88,7 @@ class MetricsTracker:
         update_interval: int = 15,
         input_cost_per_million: float = 3.00,
         output_cost_per_million: float = 15.00,
+        embedding_cost_per_million: float = 0.10,
         phases: Optional[list] = None,
     ):
         """
@@ -91,6 +99,7 @@ class MetricsTracker:
             update_interval: Seconds between live display updates
             input_cost_per_million: Cost per 1M input tokens
             output_cost_per_million: Cost per 1M output tokens
+            embedding_cost_per_million: Cost per 1M embedding tokens
             phases: List of phases to track. Defaults to LEGACY_PHASES.
         """
         # Load defaults from env if not provided
@@ -98,10 +107,13 @@ class MetricsTracker:
             input_cost_per_million = float(os.getenv("LLM_INPUT_COST_PER_M", "3.00"))
         if output_cost_per_million == 15.00:  # Default value check
             output_cost_per_million = float(os.getenv("LLM_OUTPUT_COST_PER_M", "15.00"))
+        if embedding_cost_per_million == 0.10:  # Default value check
+            embedding_cost_per_million = float(os.getenv("EMBEDDING_COST_PER_M", "0.10"))
 
         self.metrics = WorkflowMetrics(
             input_cost_per_million=input_cost_per_million,
             output_cost_per_million=output_cost_per_million,
+            embedding_cost_per_million=embedding_cost_per_million,
         )
         self.enable_live_display = enable_live_display
         self.update_interval = update_interval
@@ -167,6 +179,25 @@ class MetricsTracker:
             self.metrics.phases[phase].llm_tokens_input += input_tokens
             self.metrics.phases[phase].llm_tokens_output += output_tokens
 
+    def record_embedding_tokens(
+        self, tokens: int, phase_name: Optional[str] = None
+    ):
+        """Record embedding token usage."""
+        self.metrics.total_embedding_tokens += tokens
+
+    def record_reasoning_tokens(
+        self, tokens: int, phase_name: Optional[str] = None
+    ):
+        """Record reasoning/thinking token usage (Claude, OpenAI o1/o3, Gemini)."""
+        self.metrics.total_reasoning_tokens += tokens
+
+    def record_cache_tokens(
+        self, creation: int = 0, read: int = 0, phase_name: Optional[str] = None
+    ):
+        """Record cache token usage (Anthropic cache_creation/cache_read)."""
+        self.metrics.total_cache_creation_tokens += creation
+        self.metrics.total_cache_read_tokens += read
+
     def estimate_cost(self) -> float:
         """Estimate total cost from token usage."""
         input_cost = (
@@ -175,7 +206,33 @@ class MetricsTracker:
         output_cost = (
             self.metrics.total_llm_tokens_output / 1_000_000
         ) * self.metrics.output_cost_per_million
-        return input_cost + output_cost
+
+        # Embedding cost
+        embedding_cost = (
+            self.metrics.total_embedding_tokens / 1_000_000
+        ) * self.metrics.embedding_cost_per_million
+
+        # Reasoning tokens billed at output rate
+        reasoning_cost = (
+            self.metrics.total_reasoning_tokens / 1_000_000
+        ) * self.metrics.output_cost_per_million
+
+        # Cache tokens (Anthropic pricing: creation=1.25x input, read=0.1x input)
+        cache_creation_cost = (
+            self.metrics.total_cache_creation_tokens / 1_000_000
+        ) * self.metrics.input_cost_per_million * 1.25
+        cache_read_cost = (
+            self.metrics.total_cache_read_tokens / 1_000_000
+        ) * self.metrics.input_cost_per_million * 0.1
+
+        return (
+            input_cost
+            + output_cost
+            + embedding_cost
+            + reasoning_cost
+            + cache_creation_cost
+            + cache_read_cost
+        )
 
     def get_total_duration(self) -> float:
         """Get total workflow duration in seconds."""
@@ -283,8 +340,16 @@ class MetricsTracker:
 
         # Cost breakdown
         lines.append("\n--- Cost Estimate ---")
-        lines.append(f"  Input Tokens:  {self.metrics.total_llm_tokens_input:>12,}")
-        lines.append(f"  Output Tokens: {self.metrics.total_llm_tokens_output:>12,}")
+        lines.append(f"  Input Tokens:      {self.metrics.total_llm_tokens_input:>12,}")
+        lines.append(f"  Output Tokens:     {self.metrics.total_llm_tokens_output:>12,}")
+        if self.metrics.total_embedding_tokens > 0:
+            lines.append(f"  Embedding Tokens:  {self.metrics.total_embedding_tokens:>12,}")
+        if self.metrics.total_reasoning_tokens > 0:
+            lines.append(f"  Reasoning Tokens:  {self.metrics.total_reasoning_tokens:>12,}")
+        if self.metrics.total_cache_creation_tokens > 0:
+            lines.append(f"  Cache Creation:    {self.metrics.total_cache_creation_tokens:>12,}")
+        if self.metrics.total_cache_read_tokens > 0:
+            lines.append(f"  Cache Read:        {self.metrics.total_cache_read_tokens:>12,}")
         lines.append(f"  Estimated Cost: ${self.estimate_cost():.4f}")
         lines.append(
             f"  (Rates: ${self.metrics.input_cost_per_million}/M input, "
@@ -319,6 +384,10 @@ class MetricsTracker:
             "total_llm_time": self.get_total_llm_time(),
             "total_tokens_input": self.metrics.total_llm_tokens_input,
             "total_tokens_output": self.metrics.total_llm_tokens_output,
+            "total_embedding_tokens": self.metrics.total_embedding_tokens,
+            "total_reasoning_tokens": self.metrics.total_reasoning_tokens,
+            "total_cache_creation_tokens": self.metrics.total_cache_creation_tokens,
+            "total_cache_read_tokens": self.metrics.total_cache_read_tokens,
             "estimated_cost": self.estimate_cost(),
             "phases": {name: self.get_phase_stats(name) for name in self.tracked_phases},
         }
