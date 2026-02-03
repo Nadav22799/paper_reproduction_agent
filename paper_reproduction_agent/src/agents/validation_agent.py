@@ -33,6 +33,7 @@ class ValidationAgent:
         max_iterations: int = 30,
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
+        callbacks=None,
     ):
         """Initialize the Validation Agent.
 
@@ -46,6 +47,7 @@ class ValidationAgent:
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
         self.hierarchical_context = hierarchical_context
+        self.callbacks = callbacks or []
 
         from ..config.prompts import VALIDATION_AGENT_PROMPT
         self.system_prompt = VALIDATION_AGENT_PROMPT
@@ -117,13 +119,6 @@ Task:
             prompt=self.system_prompt,
         )
 
-        # Prepare callbacks for logging and metrics
-        callbacks = []
-        if self.metrics_tracker:
-            callbacks.append(LoggingCallbackHandler(
-                verbose=True,
-                metrics_tracker=self.metrics_tracker
-            ))
 
         print("\n" + "-" * 60)
         print(f"Validation Agent: Verifying results for {code_path}")
@@ -134,8 +129,8 @@ Task:
             print("   💭 Validation verification plan:")
 
             config = {"recursion_limit": self.max_iterations}
-            if callbacks:
-                config["callbacks"] = callbacks
+            if self.callbacks:
+                config["callbacks"] = self.callbacks
 
             all_messages = []  # Collect all messages for analysis
             for event in agent.stream(

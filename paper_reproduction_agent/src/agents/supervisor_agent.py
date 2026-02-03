@@ -20,6 +20,7 @@ class SupervisorAgent:
         llm=None,
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
+        callbacks=None,
     ):
         """Initialize the Supervisor Agent.
 
@@ -31,6 +32,7 @@ class SupervisorAgent:
         self.llm = llm or create_llm(temperature=0.1)
         self.metrics_tracker = metrics_tracker
         self.hierarchical_context = hierarchical_context
+        self.callbacks = callbacks or []
 
     def decide_next_agent(self, state: Dict) -> Dict:
         """Determine which agent should handle the current state.
@@ -453,7 +455,12 @@ Return ONLY the category name (DATA, ENVIRONMENT, or CODE)."""
 
         try:
             from langchain_core.messages import HumanMessage
-            response = self.llm.invoke([HumanMessage(content=prompt)])
+            
+            config = {}
+            if self.callbacks:
+                config["callbacks"] = self.callbacks
+                
+            response = self.llm.invoke([HumanMessage(content=prompt)], config=config)
             
             content = response.content
             if isinstance(content, list):

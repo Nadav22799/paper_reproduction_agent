@@ -36,6 +36,7 @@ class PlanningAgent:
         max_iterations: int = 30,
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
+        callbacks: List = None,
     ):
         """Initialize the Planning Agent.
 
@@ -49,6 +50,7 @@ class PlanningAgent:
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
         self.hierarchical_context = hierarchical_context
+        self.callbacks = callbacks or []
 
         self.system_prompt = """You are a Planning Specialist for ML paper reproduction.
 
@@ -60,6 +62,7 @@ Your job is to create a comprehensive reproduction_checklist.md that guides all 
 ═══════════════════════════════════════════════════════════════
 PHASE 1: READ AND ANALYZE
 ═══════════════════════════════════════════════════════════════
+
 
 1. Read the root README.md thoroughly
 2. Look for nested READMEs in subdirectories (examples/, docs/, data/, scripts/)
@@ -314,22 +317,15 @@ Start by listing the repository contents."""
             prompt=self.system_prompt,
         )
 
-        # Prepare callbacks for logging and metrics
-        callbacks = []
-        if self.metrics_tracker:
-            callbacks.append(LoggingCallbackHandler(
-                verbose=True,
-                metrics_tracker=self.metrics_tracker
-            ))
-
+        # Prepare callbacks
         print("\n" + "-" * 60)
         print(f"Planning Agent: Creating checklist for {code_path}")
         print("-" * 60)
 
         try:
             config = {"recursion_limit": self.max_iterations}
-            if callbacks:
-                config["callbacks"] = callbacks
+            if self.callbacks:
+                config["callbacks"] = self.callbacks
             result = agent.invoke(
                 {"messages": [HumanMessage(content=planning_prompt)]},
                 config,

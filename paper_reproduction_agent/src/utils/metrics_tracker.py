@@ -16,6 +16,7 @@ class PhaseMetrics:
     name: str
     start_time: Optional[float] = None
     end_time: Optional[float] = None
+    accumulated_duration: float = 0.0  # Total duration across multiple execution cycles
     llm_tokens_input: int = 0
     llm_tokens_output: int = 0
     experiment_wall_time: float = 0.0  # Time spent waiting on experiments
@@ -23,11 +24,11 @@ class PhaseMetrics:
 
     @property
     def duration(self) -> float:
-        """Calculate phase duration in seconds."""
-        if self.start_time is None:
-            return 0.0
-        end = self.end_time or time.time()
-        return end - self.start_time
+        """Calculate phase duration in seconds (current + accumulated)."""
+        # If currently running, add current elapsed time to accumulated
+        if self.status == "running" and self.start_time is not None:
+             return self.accumulated_duration + (time.time() - self.start_time)
+        return self.accumulated_duration
 
     @property
     def llm_time(self) -> float:
@@ -42,6 +43,7 @@ class WorkflowMetrics:
     phases: Dict[str, PhaseMetrics] = field(default_factory=dict)
     workflow_start: Optional[float] = None
     workflow_end: Optional[float] = None
+    embedding_model: str = "Unknown"  # Track which model is used
     total_llm_tokens_input: int = 0
     total_llm_tokens_output: int = 0
 
@@ -128,6 +130,10 @@ class MetricsTracker:
         for phase in self.tracked_phases:
             self.metrics.phases[phase] = PhaseMetrics(name=phase)
 
+    def set_embedding_model(self, model_name: str):
+        """Set the embedding model name for reporting."""
+        self.metrics.embedding_model = model_name
+
     def start_workflow(self):
         """Mark workflow start and begin live display if enabled."""
         self.metrics.workflow_start = time.time()
@@ -157,6 +163,13 @@ class MetricsTracker:
         """Mark phase end."""
         if phase_name in self.metrics.phases:
             phase = self.metrics.phases[phase_name]
+            
+            # Accumulate duration from this run
+            if phase.start_time:
+                duration = time.time() - phase.start_time
+                phase.accumulated_duration += duration
+                phase.start_time = None  # Reset prevents double counting
+            
             phase.end_time = time.time()
             phase.status = "completed" if success else "failed"
             if self._current_phase == phase_name:
@@ -212,11 +225,6 @@ class MetricsTracker:
             self.metrics.total_embedding_tokens / 1_000_000
         ) * self.metrics.embedding_cost_per_million
 
-        # Reasoning tokens billed at output rate
-        reasoning_cost = (
-            self.metrics.total_reasoning_tokens / 1_000_000
-        ) * self.metrics.output_cost_per_million
-
         # Cache tokens (Anthropic pricing: creation=1.25x input, read=0.1x input)
         cache_creation_cost = (
             self.metrics.total_cache_creation_tokens / 1_000_000
@@ -225,11 +233,13 @@ class MetricsTracker:
             self.metrics.total_cache_read_tokens / 1_000_000
         ) * self.metrics.input_cost_per_million * 0.1
 
+        # NOTE: reasoning_tokens are already included in total_llm_tokens_output 
+        # by Gemini, OpenAI, and Anthropic. We track them for breakdown only.
+        
         return (
             input_cost
             + output_cost
             + embedding_cost
-            + reasoning_cost
             + cache_creation_cost
             + cache_read_cost
         )
@@ -312,7 +322,8 @@ class MetricsTracker:
         lines.append("\n--- Phase Breakdown ---")
         for phase_name in self.tracked_phases:
             phase = self.metrics.phases[phase_name]
-            if phase.start_time is not None:
+            # Check status instead of start_time, because completed phases have start_time=None
+            if phase.status != "pending":
                 status_icon = {
                     "completed": " OK ",
                     "failed": "FAIL",
@@ -337,6 +348,10 @@ class MetricsTracker:
             f"  Experiment Time:    {self._format_duration(total_experiment_time)}"
         )
         lines.append(f"  Total:              {self._format_duration(total_duration)}")
+
+        # Config info
+        lines.append("\n--- Configuration ---")
+        lines.append(f"  Embedding Model:    {self.metrics.embedding_model}")
 
         # Cost breakdown
         lines.append("\n--- Cost Estimate ---")

@@ -29,7 +29,8 @@ def cli():
 @click.option("--no-logging", is_flag=True, help="Disable file logging")
 @click.option("--no-checkpoints", is_flag=True, help="Disable checkpoint/resume")
 @click.option("--max-iterations", default=50, help="Maximum tool iterations")
-def reproduce(paper_input, no_logging, no_checkpoints, max_iterations):
+@click.option("--max-cycles", default=5, help="Maximum recovery/validation cycles")
+def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycles):
     """Reproduce a paper given its arXiv ID, URL, or Path.
 
     PAPER_INPUT can be:
@@ -61,6 +62,7 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations):
 
     try:
         click.echo(f"🚀 Starting reproduction for: {paper_input}")
+        click.echo(f"🔄 Max cycles: {max_cycles}")
 
         # Disable orchestrator's internal logging since we capture stdout
         orchestrator = PaperReproductionOrchestrator(
@@ -92,6 +94,7 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations):
             "messages": [],
             "final_status": "",
             "report": "",
+            "max_cycles": max_cycles,
         }
 
         # Try to resume from checkpoint
@@ -100,6 +103,8 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations):
              if resumed_state:
                  # Update initial state with resumed data
                  initial_state.update(resumed_state)
+                 # Ensure max_cycles from CLI overrides resumed state if needed, or stick to CLI
+                 initial_state["max_cycles"] = max_cycles
                  click.echo(f"✨ Resumed state contains {len(initial_state.get('completed_phases', []))} completed phases")
         
         # User Selection for Experiment Level (skip if already set in resumed state)

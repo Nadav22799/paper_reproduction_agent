@@ -14,7 +14,7 @@ To use local vLLM:
 import os
 
 
-def create_llm(temperature: float = 0.3, include_thoughts: bool = False):
+def create_llm(temperature: float = 0.3, include_thoughts: bool = True):
     """
     Create LLM instance based on available API keys or local model.
 
@@ -253,7 +253,7 @@ def get_available_providers() -> list:
     return providers
 
 
-def create_specific_llm(provider: str, temperature: float = 0.1, include_thoughts: bool = False):
+def create_specific_llm(provider: str, temperature: float = 0.1, include_thoughts: bool = True):
     """
     Create LLM for a specific provider.
 

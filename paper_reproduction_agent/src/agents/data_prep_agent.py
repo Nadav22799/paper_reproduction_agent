@@ -33,6 +33,7 @@ class DataPrepAgent:
         max_iterations: int = 50,
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
+        callbacks=None,
     ):
         """Initialize the Data Preparation Agent.
 
@@ -46,6 +47,7 @@ class DataPrepAgent:
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
         self.hierarchical_context = hierarchical_context
+        self.callbacks = callbacks or []
 
         from ..config.prompts import DATA_PREP_AGENT_PROMPT
         self.system_prompt = DATA_PREP_AGENT_PROMPT
@@ -128,22 +130,24 @@ Start by analyzing the provided context."""
             prompt=self.system_prompt,
         )
 
-        # Prepare callbacks for logging and metrics
-        callbacks = []
-        if self.metrics_tracker:
-            callbacks.append(LoggingCallbackHandler(
-                verbose=True,
-                metrics_tracker=self.metrics_tracker
-            ))
 
         print("\n" + "-" * 60)
         print(f"Data Prep Agent: Starting data preparation for {code_path}")
         print("-" * 60)
-
+        
+        # ------------------------------------------------------------------
+        # PHASE 1: VERIFICATION (Agent-driven search)
+        # ------------------------------------------------------------------
+        # Instead of heuristics, we let the agent search first.
+        # But we can also do a quick programmatic check for common patterns 
+        # to save time/tokens if obvious. 
+        # Actually, let's follow the user's request: CLEAN logic, no heuristics.
+        # So we do NOT add heuristics here. We rely on the prompt to drive search.
+        
         try:
             config = {"recursion_limit": self.max_iterations}
-            if callbacks:
-                config["callbacks"] = callbacks
+            if self.callbacks:
+                config["callbacks"] = self.callbacks
             result = agent.invoke(
                 {"messages": [HumanMessage(content=data_prompt)]},
                 config,
@@ -187,7 +191,7 @@ Start by analyzing the provided context."""
             }
 
     def _analyze_result(self, result: Dict, code_path: str) -> tuple:
-        """Analyze agent result to determine success.
+        """Analyze agent result to determine success using strict protocol.
 
         Args:
             result: Agent execution result
@@ -196,26 +200,8 @@ Start by analyzing the provided context."""
         Returns:
             Tuple of (success: bool, details: dict, last_message: str)
         """
-        # Check common data directories (searching up to depth 2)
-        data_dirs_names = ["data", "datasets", "DATA", "Datasets", "corpus", "input"]
-        found_data = False
-        data_locations = []
-
-        # Walk directory up to depth 2 to find data folders
-        for root, dirs, files in os.walk(code_path):
-            # Calculate depth
-            depth = root[len(code_path):].count(os.sep)
-            if depth > 2:
-                dirs[:] = [] # Stop recursing
-                continue
-                
-            for d in dirs:
-                if d in data_dirs_names:
-                    full_path = os.path.join(root, d)
-                    if os.listdir(full_path):
-                        found_data = True
-                        data_locations.append(full_path)
-
+        import re
+        
         # Extract info from agent messages
         messages = result.get("messages", [])
         last_message = ""
@@ -234,42 +220,27 @@ Start by analyzing the provided context."""
                 else:
                     last_message = str(last_msg.content)
 
-        # Look for success indicators in output
-        success_indicators = [
-            "download complete",
-            "downloaded successfully",
-            "data ready",
-            "datasets prepared",
-            "verification passed",
-            "already exists",
-            "found existing",
-            "data was already present",
-            "verification status: passed",
-            "datasets downloaded:",
-        ]
-
-        # Indicators that definitely mean failure, unless overridden by strong success
-        failure_indicators = [
-            "download failed",
-            "error downloading",
-            "could not download",
-            "permission denied",
-        ]
-
-        output_lower = last_message.lower()
-        has_success = any(ind in output_lower for ind in success_indicators)
-        has_failure = any(ind in output_lower for ind in failure_indicators)
+        # Clean, strict parsing based on requested output format
+        # Pattern: DATA PREP STATUS: [SUCCESS/FAILED]
+        status_match = re.search(r"DATA PREP STATUS:\s*(SUCCESS|FAILED)", last_message, re.IGNORECASE)
+        path_match = re.search(r"data_path:\s*(.+)", last_message, re.IGNORECASE)
         
-        # Check for strong success signal that overrides incidental "not found" text
-        strong_success = "verification status: passed" in output_lower or "any issues encountered: none" in output_lower
-
-        # Determine success
-        # Prioritize strong success signals or finding actual data
-        success = found_data or strong_success or (has_success and not has_failure)
+        success = False
+        data_locations = []
+        
+        if status_match:
+            status = status_match.group(1).upper()
+            if status == "SUCCESS":
+                success = True
+        
+        if path_match:
+            path = path_match.group(1).strip()
+            if path and path.lower() != "n/a":
+                data_locations.append(path)
 
         details = {
             "data_locations": data_locations,
-            "found_existing": found_data,
+            "found_existing": success, # simplified logic: success implies data exists now
             "agent_output": last_message[:500] if last_message else "",
         }
 

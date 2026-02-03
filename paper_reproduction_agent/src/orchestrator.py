@@ -198,14 +198,18 @@ class PaperReproductionOrchestrator:
         self.enable_logging = enable_logging
         self.file_logger = None
         self.logging_callback = None
+        self.file_logger = None
+        
         if enable_logging:
             self.file_logger = FileLogger(log_dir=self.config.logs_path)
-            # Wire metrics_tracker to logging callback for token tracking
-            self.logging_callback = LoggingCallbackHandler(
-                verbose=True,
-                file_logger=self.file_logger,
-                metrics_tracker=self.metrics_tracker,
-            )
+            
+        # Always create callback for metrics tracking and stdout logging
+        # (CLI captures stdout via TeeOutput, so we want verbose=True)
+        self.logging_callback = LoggingCallbackHandler(
+            verbose=True,
+            file_logger=self.file_logger,
+            metrics_tracker=self.metrics_tracker,
+        )
 
         # Setup checkpoint manager
         self.enable_checkpoints = enable_checkpoints
@@ -218,6 +222,14 @@ class PaperReproductionOrchestrator:
 
         # Initialize embedder using factory (API-based by default for speed)
         embedder = create_embedder(metrics_tracker=self.metrics_tracker)  # Uses EMBEDDING_PROVIDER env var (default: gemini)
+        
+        # Capture embedding model name if available
+        if embedder and hasattr(embedder, "model"):
+            self.metrics_tracker.set_embedding_model(embedder.model)
+        elif embedder:
+            self.metrics_tracker.set_embedding_model("Custom/Local")
+        else:
+            self.metrics_tracker.set_embedding_model("None")
 
         # Initialize shared hierarchical context manager for cross-agent context
         self.hierarchical_context = HierarchicalContextManager(
@@ -228,15 +240,22 @@ class PaperReproductionOrchestrator:
         )
         print("🧠 Hierarchical context manager initialized")
 
+        # Start metrics tracking immediately
+        self.metrics_tracker.start_workflow()
+
         # Initialize legacy agents (always needed for backward compatibility)
         self.env_setup_agent = EnvironmentSetupAgent(
-            self.llm, max_iterations=50, metrics_tracker=self.metrics_tracker
+            self.reasoning_llm,
+            max_iterations=50,
+            metrics_tracker=self.metrics_tracker,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.unified_reproducer = UnifiedReproductionAgent(
             self.llm,
             max_iterations=50,
             hierarchical_context=self.hierarchical_context,
             metrics_tracker=self.metrics_tracker,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.discovery_agent = DiscoveryAgent(
             self.llm, metrics_tracker=self.metrics_tracker
@@ -265,34 +284,40 @@ class PaperReproductionOrchestrator:
             self.reasoning_llm,  # Use Thinking Mode for complex routing
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.planning_agent = PlanningAgent(
             self.reasoning_llm,  # Use Thinking Mode for detailed planning
             max_iterations=30,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.critic_agent = CriticAgent(
             metrics_tracker=self.metrics_tracker,
-            enable_llm_critic=self.config.enable_llm_critic
+            enable_llm_critic=self.config.enable_llm_critic,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.data_prep_agent = DataPrepAgent(
-            self.llm,
+            self.reasoning_llm,
             max_iterations=50,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.execution_agent = ExecutionAgent(
-            self.llm,
+            self.reasoning_llm,
             max_iterations=50,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.validation_agent = ValidationAgent(
-            self.llm,
+            self.reasoning_llm,
             max_iterations=30,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
         )
 
     def _build_workflow(self) -> StateGraph:
@@ -536,6 +561,7 @@ class PaperReproductionOrchestrator:
 
     def _supervisor_node(self, state: PaperReproductionState) -> PaperReproductionState:
         """Supervisor node - decides which agent to invoke next."""
+        self.metrics_tracker.start_phase("supervisor")
         print("🎯 Supervisor: Analyzing state and routing...")
 
         decision = self.supervisor_agent.decide_next_agent(state)
@@ -546,10 +572,12 @@ class PaperReproductionOrchestrator:
         print(f"   → Routing to: {state['current_agent']}")
         print(f"   → Directive: {state['supervisor_directive'][:80]}...")
 
+        self.metrics_tracker.end_phase("supervisor")
         return state
 
     def _critic_node(self, state: PaperReproductionState) -> PaperReproductionState:
         """Critic node - validates reasoning and actions before execution."""
+        self.metrics_tracker.start_phase("critic")
         
         action = state.get("proposed_action")
         directive = state.get("supervisor_directive")
@@ -578,6 +606,7 @@ class PaperReproductionOrchestrator:
         else:
             print("   ✅ Action approved")
 
+        self.metrics_tracker.end_phase("critic")
         return state
 
     def _data_prep_node(self, state: PaperReproductionState) -> PaperReproductionState:
@@ -648,7 +677,11 @@ class PaperReproductionOrchestrator:
         self.metrics_tracker.start_phase("execution")
         print("🚀 Execution: Running experiments...")
 
+        import time
+        start_exp = time.time()
         result = self.execution_agent.run_experiments(state)
+        # Record actual experiment time (wall time)
+        self.metrics_tracker.record_experiment_time("execution", time.time() - start_exp)
 
         # Store agent reasoning for critic inspection and optionally print
         state["current_reasoning"] = result.get("last_message", "")

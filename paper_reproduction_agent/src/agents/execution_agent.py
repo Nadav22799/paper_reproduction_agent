@@ -39,6 +39,7 @@ class ExecutionAgent:
         max_iterations: int = 50,
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
+        callbacks=None,
     ):
         """Initialize the Execution Agent.
 
@@ -52,6 +53,7 @@ class ExecutionAgent:
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
         self.hierarchical_context = hierarchical_context
+        self.callbacks = callbacks or []
 
         # Detect system resources
         self.resources = detect_system_resources()
@@ -264,13 +266,6 @@ Start by reading the checklist to confirm tool, environment, and experiment list
             prompt=full_prompt,
         )
 
-        # Prepare callbacks for logging and metrics
-        callbacks = []
-        if self.metrics_tracker:
-            callbacks.append(LoggingCallbackHandler(
-                verbose=True,
-                metrics_tracker=self.metrics_tracker
-            ))
 
         print("\n" + "-" * 60)
         print(f"Execution Agent: Starting experiment execution for {code_path}")
@@ -278,8 +273,8 @@ Start by reading the checklist to confirm tool, environment, and experiment list
 
         try:
             config = {"recursion_limit": self.max_iterations * 3}
-            if callbacks:
-                config["callbacks"] = callbacks
+            if self.callbacks:
+                config["callbacks"] = self.callbacks
             result = agent.invoke(
                 {"messages": [HumanMessage(content=execution_prompt)]},
                 config,

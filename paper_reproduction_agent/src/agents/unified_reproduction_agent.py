@@ -48,10 +48,12 @@ class UnifiedReproductionAgent:
         max_iterations=50,
         hierarchical_context: HierarchicalContextManager = None,
         metrics_tracker=None,
+        callbacks: List = None,
     ):
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
+        self.callbacks = callbacks or []
 
         # Initialize token-based context manager to prevent context explosion
         self.context_manager = ContextManager(
@@ -85,6 +87,7 @@ CORE PRINCIPLES
 3. FOLLOW NESTED READMES - Read sub-READMEs if referenced.
 4. VERIFY INSTALLATIONS - Confirm with `pip list` or imports.
 5. WRITE CODE TO SOLVE PROBLEMS - Use execute_python_code() for extraction/comparison.
+6. RESOURCE AWARENESS - Check GPUs/CPU before running scripts and adapt commands.
 6. RESOURCE AWARENESS - Check GPUs/CPU before running scripts and adapt commands.
 
 ═══════════════════════════════════════════════════════════════
@@ -482,18 +485,10 @@ Remember:
 """
 
         messages = [HumanMessage(content=task)]
-        callback = LoggingCallbackHandler(
-            verbose=True, metrics_tracker=self.metrics_tracker
-        )
-
         try:
-            print("\n" + "=" * 60)
-            print("🚀 STARTING UNIFIED REPRODUCTION WORKFLOW")
-            print("=" * 60)
-
             # Use custom agent loop with context management
             result = self._run_agent_with_context_management(
-                messages=messages, callback=callback
+                messages=messages, callbacks=self.callbacks
             )
 
         except Exception as e:
@@ -508,7 +503,7 @@ Remember:
 
         return self._parse_reproduction_result(result, code_path, experiment_names)
 
-    def _run_agent_with_context_management(self, messages: List, callback) -> Dict:
+    def _run_agent_with_context_management(self, messages: List, callbacks: List) -> Dict:
         """
         Run agent with context pruning to prevent explosion.
 
@@ -532,9 +527,8 @@ Remember:
                 result = self.agent.invoke(
                     {"messages": current_messages},
                     config={
-                        "recursion_limit": batch_size
-                        * 4,  # Increased to 4x (now 60 instead of 30)
-                        "callbacks": [callback],
+                        "recursion_limit": batch_size * 4,
+                        "callbacks": callbacks,
                     },
                 )
 

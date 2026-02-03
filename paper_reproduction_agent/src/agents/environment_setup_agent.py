@@ -31,10 +31,11 @@ from ..utils.logging_callback import LoggingCallbackHandler
 class EnvironmentSetupAgent:
     """Specialized agent for environment preparation and setup."""
 
-    def __init__(self, llm=None, max_iterations=50, metrics_tracker=None):
+    def __init__(self, llm=None, max_iterations=50, metrics_tracker=None, callbacks=None):
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
+        self.callbacks = callbacks or []
 
         from ..config.prompts import ENVIRONMENT_AGENT_PROMPT
         self.system_prompt = ENVIRONMENT_AGENT_PROMPT
@@ -136,6 +137,10 @@ class EnvironmentSetupAgent:
 
         # Run agent
         try:
+            # Prepare callbacks list, combining internal logging with any provided callbacks
+            invoke_callbacks = list(self.callbacks) # Start with user-provided callbacks
+            invoke_callbacks.append(LoggingCallbackHandler(metrics_tracker=self.metrics_tracker))
+
             result = self.agent.invoke(
                 {
                     "messages": [
@@ -144,9 +149,7 @@ class EnvironmentSetupAgent:
                 },
                 config={
                     "recursion_limit": self.max_iterations * 3,
-                    "callbacks": [
-                        LoggingCallbackHandler(metrics_tracker=self.metrics_tracker)
-                    ],
+                    "callbacks": invoke_callbacks,
                 },
             )
 

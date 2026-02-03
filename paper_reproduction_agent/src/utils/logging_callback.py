@@ -40,6 +40,62 @@ class LoggingCallbackHandler(BaseCallbackHandler):
 
     def on_llm_end(self, response, **kwargs) -> None:
         """Run when LLM ends."""
+        
+        # 0. AGGRESSIVE REASONING LOGGING (Must happen before anything else)
+        # Try to find reasoning in ANY generation or output field
+        thoughts = None
+        
+        # Check deep inside generations (Standard location for Gemini/others)
+        if hasattr(response, "generations") and response.generations:
+            for gen_list in response.generations:
+                for gen in gen_list:
+                    if not hasattr(gen, "message"):
+                        continue
+                        
+                    message = gen.message
+                    
+                    # Method A: Content Blocks (List of Dicts)
+                    # Newer LangChain usage for structured models like Gemini
+                    if isinstance(message.content, list):
+                        for block in message.content:
+                            if isinstance(block, dict):
+                                # Check for blocks like {'type': 'thought', 'thought': '...'}
+                                # or {'type': 'thinking', 'thinking': '...'} (Anthropic Claude)
+                                if block.get("type") in ["thought", "thinking", "reasoning"]:
+                                    thoughts = block.get("thought") or block.get("thinking") or block.get("content") or block.get("text")
+                                elif block.get("type") == "text" and any(k in block.get("text", "").lower()[:50] for k in ["thought", "reasoning"]):
+                                    thoughts = block.get("text")
+                            if thoughts: break
+                    
+                    # Method B: additional_kwargs (Thoughts, Reasoning, etc.)
+                    if not thoughts and hasattr(message, "additional_kwargs"):
+                        ak = message.additional_kwargs
+                        # reasoning_content is used by OpenAI o1/o3
+                        thoughts = ak.get("thoughts") or ak.get("reasoning_content") or ak.get("reasoning")
+                        
+                        # Special Case: Gemini placeholder tools
+                        if not thoughts and "tool_calls" in ak:
+                            for tc in ak["tool_calls"]:
+                                func = tc.get("function", {})
+                                if "placeholder_thoughts" in func.get("name", ""):
+                                    thoughts = func.get("arguments")
+                    
+                    # Method C: generation_info
+                    if not thoughts and hasattr(gen, "generation_info") and gen.generation_info:
+                        gi = gen.generation_info
+                        thoughts = gi.get("thoughts") or gi.get("reasoning")
+                        
+                    if thoughts:
+                        self._log(f"\n💭 Reasoning:\n{thoughts}\n")
+                        break
+                if thoughts: break
+
+        # Check top-level LLM output as a fallback
+        if not thoughts and hasattr(response, "llm_output") and response.llm_output:
+             if "thoughts" in response.llm_output:
+                thoughts = response.llm_output['thoughts']
+                self._log(f"\n💭 Reasoning (LLM Output):\n{thoughts}\n")
+
         # Track token usage if metrics_tracker is provided
         if self.metrics_tracker:
             try:
@@ -93,11 +149,21 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                             text = gen.text
                         elif hasattr(gen, "message"):
                             message = gen.message
-                            text = (
-                                str(message.content)
-                                if hasattr(message, "content")
-                                else str(message)
-                            )
+                            # Correctly handle list-based content for display
+                            if isinstance(message.content, list):
+                                text_parts = []
+                                for block in message.content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        text_parts.append(block.get("text", ""))
+                                    elif isinstance(block, str):
+                                        text_parts.append(block)
+                                text = "".join(text_parts)
+                            else:
+                                text = (
+                                    str(message.content)
+                                    if hasattr(message, "content")
+                                    else str(message)
+                                )
 
                             # Debug: Check for tool calls
                             if hasattr(message, "tool_calls") and message.tool_calls:
@@ -125,12 +191,13 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                                 )
                                 for tc in tool_calls:
                                     self._log(f"   - {tc}\n")
-                        else:
-                            text = str(gen)
+                            
+                            # Reasoning is already logged at the top, no need to duplicate here.
+                            # We just log the text response itself now.
 
-                        self._log("\n💬 LLM Response:\n")
-                        self._log(f"{text}\n")  # Log full response, not truncated
-                        self._log(f"\n(Response length: {len(text)} chars)\n")
+                            self._log("\n💬 LLM Response:\n")
+                            self._log(f"{text}\n")  # Log full response, not truncated
+                            self._log(f"\n(Response length: {len(text)} chars)\n")
 
     def _record_usage_from_dict(self, usage: dict) -> bool:
         """Helper to extract and record tokens from a usage dictionary."""
@@ -143,11 +210,9 @@ class LoggingCallbackHandler(BaseCallbackHandler):
         )
 
         # Handle total_tokens calculation if needed
-        if not output_tokens and "total_tokens" in usage:
-            output_tokens = usage["total_tokens"] - input_tokens
 
-        if input_tokens or output_tokens:
-            self.metrics_tracker.record_tokens(input_tokens, output_tokens)
+
+        self.metrics_tracker.record_tokens(input_tokens, output_tokens)
 
         # Extract reasoning tokens from multiple provider formats
         reasoning_tokens = 0

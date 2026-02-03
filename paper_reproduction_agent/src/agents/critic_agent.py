@@ -63,7 +63,7 @@ class CriticAgent:
         "create_python_file",
     ]
 
-    def __init__(self, metrics_tracker=None, enable_llm_critic: bool = False):
+    def __init__(self, metrics_tracker=None, enable_llm_critic: bool = False, callbacks=None):
         """Initialize the Critic Agent.
 
         Args:
@@ -75,6 +75,7 @@ class CriticAgent:
         self.approved_count = 0
         self.llm_inspections = 0
         self.enable_llm_critic = enable_llm_critic
+        self.callbacks = callbacks or []
         self._llm = None  # Lazy init
 
     def _get_llm(self):
@@ -273,13 +274,7 @@ Respond with ONLY one of:
         try:
             llm = self._get_llm()
             # Use callbacks for metrics tracking if available
-            callbacks = []
-            if self.metrics_tracker:
-                callbacks.append(LoggingCallbackHandler(
-                    verbose=False,  # Quiet mode for critic
-                    metrics_tracker=self.metrics_tracker
-                ))
-            response = llm.invoke(prompt, config={"callbacks": callbacks} if callbacks else None)
+            response = llm.invoke(prompt, config={"callbacks": self.callbacks} if self.callbacks else None)
             result_text = response.content.strip()
 
             if result_text.startswith("DANGEROUS:"):
