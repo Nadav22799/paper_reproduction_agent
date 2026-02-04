@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """Simple script to run paper reproduction for a specific paper."""
 
-# IMPORTANT: Set multiprocessing start method BEFORE any other imports
-# This fixes CUDA forking issues with vLLM
-import multiprocessing
-try:
-    multiprocessing.set_start_method('spawn', force=True)
-except RuntimeError:
-    pass  # Already set
-
 import os
 import sys
 from pathlib import Path
@@ -50,43 +42,24 @@ load_dotenv(dotenv_path=env_path)
 
 
 def check_environment():
-    """Check if at least one LLM is configured (local or API)."""
-    # Check for local LLM first
-    use_local = os.getenv("USE_LOCAL_LLM", "false").lower() == "true"
-
-    if use_local:
-        backend = os.getenv("LOCAL_LLM_BACKEND", "ollama")
-        model = os.getenv("LOCAL_LLM_MODEL", "gemma2:2b")
-        print(f"✅ Using Local LLM ({backend}: {model})")
-        return True
-
-    # Check for API providers
+    """Check if at least one LLM provider is configured."""
+    # Check for API providers (Gemini or Claude)
     has_gemini = bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
-    has_openai = bool(os.getenv("OPENAI_API_KEY"))
-    has_groq = bool(os.getenv("GROQ_API_KEY"))
-    has_anthropic = bool(os.getenv("ANTHROPIC_API_KEY"))
+    has_claude = bool(os.getenv("ANTHROPIC_API_KEY"))
 
-    if not (has_gemini or has_openai or has_groq or has_anthropic):
-        print("❌ No LLM configured!")
-        print("\nOption 1 - Use Local LLM (No API key needed!):")
-        print("  Set USE_LOCAL_LLM=true in .env file")
-        print("\nOption 2 - Use API Provider:")
-        print("  Set at least one of:")
-        print("  - GOOGLE_API_KEY or GEMINI_API_KEY (Gemini)")
-        print("  - OPENAI_API_KEY")
-        print("  - GROQ_API_KEY")
-        print("  - ANTHROPIC_API_KEY")
+    if not (has_gemini or has_claude):
+        print("No LLM configured!")
+        print("\nSet at least one of:")
+        print("  - GOOGLE_API_KEY or GEMINI_API_KEY (for Gemini)")
+        print("  - ANTHROPIC_API_KEY (for Claude)")
         return False
 
     # Show which API provider will be used (matches priority in llm_factory.py)
-    if has_gemini:
-        print("✅ Using Google Gemini")
-    elif has_openai:
-        print("✅ Using OpenAI")
-    elif has_groq:
-        print("✅ Using Groq (fast and free)")
-    elif has_anthropic:
-        print("✅ Using Anthropic")
+    provider = os.getenv("LLM_PROVIDER", "").lower()
+    if provider == "claude" or (provider == "" and has_claude and not has_gemini):
+        print("Using Claude")
+    else:
+        print("Using Gemini")
 
     return True
 
@@ -115,9 +88,9 @@ def run_paper_reproduction(paper_input: str):
 
     try:
         print("\n" + "="*70)
-        print("🚀 PAPER REPRODUCTION AGENT")
+        print("PAPER REPRODUCTION AGENT")
         print("="*70)
-        print(f"\n📄 Input: {paper_input}\n")
+        print(f"\nInput: {paper_input}\n")
 
         # Initialize orchestrator (disable its internal file_logger to avoid duplication)
         orchestrator = PaperReproductionOrchestrator(enable_logging=False)
@@ -132,14 +105,14 @@ def run_paper_reproduction(paper_input: str):
         result = orchestrator.run(paper_input)
 
         print("\n" + "="*70)
-        print("📊 FINAL REPORT")
+        print("FINAL REPORT")
         print("="*70)
         print(result['report'])
 
         return result
 
     except Exception as e:
-        print(f"\n❌ Error during reproduction: {e}")
+        print(f"\nError during reproduction: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -148,7 +121,7 @@ def run_paper_reproduction(paper_input: str):
         # Restore stdout and close log file
         sys.stdout = tee.terminal
         tee.close()
-        print(f"\n📝 Full execution log saved to: {log_file}")
+        print(f"\nFull execution log saved to: {log_file}")
 
 
 def main():
@@ -176,7 +149,7 @@ def main():
         paper_input = input("Enter paper (arXiv ID, PDF path, or title): ").strip()
 
         if not paper_input:
-            print("❌ No input provided. Exiting.")
+            print("No input provided. Exiting.")
             sys.exit(1)
 
     # Run reproduction
@@ -184,10 +157,10 @@ def main():
 
     if result:
         print("\n" + "="*70)
-        print("✅ Workflow completed successfully!")
+        print("Workflow completed successfully!")
         print("="*70)
     else:
-        print("\n❌ Reproduction workflow failed.")
+        print("\nReproduction workflow failed.")
         sys.exit(1)
 
 

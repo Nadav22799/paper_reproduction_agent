@@ -100,11 +100,26 @@ class ValidationAgent:
 
         print("📊 Validation Agent: Verifying results...")
 
+        # RETRIEVE relevant context from previous agents (exclude own to prevent self-referencing)
+        previous_context = ""
+        if self.hierarchical_context:
+            previous_context = self.hierarchical_context.compile_context(
+                query="experiment results metrics accuracy expected values execution output",
+                max_tokens=2000,
+                exclude_sources=["validation"],
+            )
+            if previous_context:
+                print(f"   📋 Retrieved {len(previous_context)} chars of previous context")
+
         # Build verification prompt
         verification_prompt = f"""Verify experiment results.
 
 Repository Path: {code_path}
 Checklist Path Hint: {checklist_path}
+
+=== CONTEXT FROM PREVIOUS AGENTS ===
+{previous_context if previous_context else "No previous context available"}
+====================================
 
 Task:
 1. Find and read the checklist to get Expected Metrics.
@@ -184,6 +199,31 @@ Task:
             # Analyze result
             result = {"messages": all_messages}
             verification = self._analyze_verification_result(result, [], experiment_mode, selected_datasets)
+
+            # Store FULL messages in hierarchical context (including tool calls)
+            if self.hierarchical_context:
+                from ..utils.context_utils import build_context_entry
+
+                validation_result = {
+                    "results_match": verification["success"],
+                    "match_ratio": verification.get("match_ratio", "N/A"),
+                    "success_level": verification["success_level"],
+                }
+
+                context_entry = build_context_entry(
+                    agent_name="validation",
+                    result=validation_result,
+                    messages=all_messages,
+                    max_detail_tokens=4000,
+                )
+
+                self.hierarchical_context.add(
+                    content=context_entry,
+                    source="validation",
+                    entry_type="result" if verification["success"] else "error",
+                    importance=0.9,
+                    lazy=True,
+                )
 
             return {
                 "results_match": verification["success"],

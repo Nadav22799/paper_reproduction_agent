@@ -35,6 +35,33 @@ class PhaseMetrics:
         """Estimated LLM time (duration minus experiment wait time)."""
         return max(0, self.duration - self.experiment_wall_time)
 
+    def to_dict(self) -> dict:
+        """Serialize phase metrics to dictionary for checkpoint saving."""
+        return {
+            "name": self.name,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "accumulated_duration": self.accumulated_duration,
+            "llm_tokens_input": self.llm_tokens_input,
+            "llm_tokens_output": self.llm_tokens_output,
+            "experiment_wall_time": self.experiment_wall_time,
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PhaseMetrics":
+        """Restore phase metrics from dictionary."""
+        return cls(
+            name=data["name"],
+            start_time=data.get("start_time"),
+            end_time=data.get("end_time"),
+            accumulated_duration=data.get("accumulated_duration", 0.0),
+            llm_tokens_input=data.get("llm_tokens_input", 0),
+            llm_tokens_output=data.get("llm_tokens_output", 0),
+            experiment_wall_time=data.get("experiment_wall_time", 0.0),
+            status=data.get("status", "pending"),
+        )
+
 
 @dataclass
 class WorkflowMetrics:
@@ -57,6 +84,48 @@ class WorkflowMetrics:
     input_cost_per_million: float = 3.00  # Default: GPT-4 Turbo input
     output_cost_per_million: float = 15.00  # Default: GPT-4 Turbo output
     embedding_cost_per_million: float = 0.10  # Default: OpenAI ada-002
+
+    def to_dict(self) -> dict:
+        """Serialize workflow metrics to dictionary for checkpoint saving."""
+        return {
+            "phases": {name: phase.to_dict() for name, phase in self.phases.items()},
+            "workflow_start": self.workflow_start,
+            "workflow_end": self.workflow_end,
+            "embedding_model": self.embedding_model,
+            "total_llm_tokens_input": self.total_llm_tokens_input,
+            "total_llm_tokens_output": self.total_llm_tokens_output,
+            "total_embedding_tokens": self.total_embedding_tokens,
+            "total_reasoning_tokens": self.total_reasoning_tokens,
+            "total_cache_creation_tokens": self.total_cache_creation_tokens,
+            "total_cache_read_tokens": self.total_cache_read_tokens,
+            "input_cost_per_million": self.input_cost_per_million,
+            "output_cost_per_million": self.output_cost_per_million,
+            "embedding_cost_per_million": self.embedding_cost_per_million,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WorkflowMetrics":
+        """Restore workflow metrics from dictionary."""
+        workflow = cls(
+            input_cost_per_million=data.get("input_cost_per_million", 3.00),
+            output_cost_per_million=data.get("output_cost_per_million", 15.00),
+            embedding_cost_per_million=data.get("embedding_cost_per_million", 0.10),
+        )
+        workflow.workflow_start = data.get("workflow_start")
+        workflow.workflow_end = data.get("workflow_end")
+        workflow.embedding_model = data.get("embedding_model", "Unknown")
+        workflow.total_llm_tokens_input = data.get("total_llm_tokens_input", 0)
+        workflow.total_llm_tokens_output = data.get("total_llm_tokens_output", 0)
+        workflow.total_embedding_tokens = data.get("total_embedding_tokens", 0)
+        workflow.total_reasoning_tokens = data.get("total_reasoning_tokens", 0)
+        workflow.total_cache_creation_tokens = data.get("total_cache_creation_tokens", 0)
+        workflow.total_cache_read_tokens = data.get("total_cache_read_tokens", 0)
+
+        # Restore phases
+        for name, phase_data in data.get("phases", {}).items():
+            workflow.phases[name] = PhaseMetrics.from_dict(phase_data)
+
+        return workflow
 
 
 class MetricsTracker:
@@ -212,7 +281,9 @@ class MetricsTracker:
         self.metrics.total_cache_read_tokens += read
 
     def estimate_cost(self) -> float:
-        """Estimate total cost from token usage."""
+        """Estimate total cost from token usage with provider-aware cache pricing."""
+        import os
+
         input_cost = (
             self.metrics.total_llm_tokens_input / 1_000_000
         ) * self.metrics.input_cost_per_million
@@ -225,17 +296,34 @@ class MetricsTracker:
             self.metrics.total_embedding_tokens / 1_000_000
         ) * self.metrics.embedding_cost_per_million
 
-        # Cache tokens (Anthropic pricing: creation=1.25x input, read=0.1x input)
+        # Cache pricing varies by provider:
+        # - Gemini: cache_read at 25% of input rate (75% discount)
+        # - Claude: cache_read at 10% of input rate (90% discount)
+        provider = os.getenv("LLM_PROVIDER", "").lower()
+        if not provider:
+            # Auto-detect from keys
+            if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
+                provider = "gemini"
+            elif os.getenv("ANTHROPIC_API_KEY"):
+                provider = "claude"
+
+        if provider in ["claude", "anthropic"]:
+            cache_read_discount = 0.10  # 90% off (Claude)
+            cache_creation_multiplier = 1.25  # Claude charges 1.25x for cache creation
+        else:
+            cache_read_discount = 0.25  # 75% off (Gemini)
+            cache_creation_multiplier = 1.0  # Gemini no extra charge for cache creation
+
         cache_creation_cost = (
             self.metrics.total_cache_creation_tokens / 1_000_000
-        ) * self.metrics.input_cost_per_million * 1.25
+        ) * self.metrics.input_cost_per_million * cache_creation_multiplier
         cache_read_cost = (
             self.metrics.total_cache_read_tokens / 1_000_000
-        ) * self.metrics.input_cost_per_million * 0.1
+        ) * self.metrics.input_cost_per_million * cache_read_discount
 
-        # NOTE: reasoning_tokens are already included in total_llm_tokens_output 
-        # by Gemini, OpenAI, and Anthropic. We track them for breakdown only.
-        
+        # NOTE: reasoning_tokens are already included in total_llm_tokens_output
+        # by Gemini and Claude. We track them for breakdown only.
+
         return (
             input_cost
             + output_cost
@@ -318,8 +406,9 @@ class MetricsTracker:
         total_duration = self.get_total_duration()
         lines.append(f"\nTotal Duration: {self._format_duration(total_duration)}")
 
-        # Phase breakdown
+        # Phase breakdown with per-phase costs
         lines.append("\n--- Phase Breakdown ---")
+        total_phase_cost = 0.0
         for phase_name in self.tracked_phases:
             phase = self.metrics.phases[phase_name]
             # Check status instead of start_time, because completed phases have start_time=None
@@ -331,13 +420,17 @@ class MetricsTracker:
                     "pending": " -- ",
                 }
                 icon = status_icon.get(phase.status, " ?? ")
+                phase_cost = self.get_phase_cost(phase_name)
+                total_phase_cost += phase_cost
+                phase_tokens = phase.llm_tokens_input + phase.llm_tokens_output
                 lines.append(
-                    f"  {phase_name:25} [{icon}] "
-                    f"Duration: {self._format_duration(phase.duration):>10} "
-                    f"(Experiment: {self._format_duration(phase.experiment_wall_time)})"
+                    f"  {phase_name:20} [{icon}] "
+                    f"Time: {self._format_duration(phase.duration):>8} | "
+                    f"Tokens: {phase_tokens:>8,} | "
+                    f"Cost: ${phase_cost:.4f}"
                 )
             else:
-                lines.append(f"  {phase_name:25} [ -- ] Not started")
+                lines.append(f"  {phase_name:20} [ -- ] Not started")
 
         # Time breakdown
         total_experiment_time = self.get_total_experiment_time()
@@ -375,6 +468,15 @@ class MetricsTracker:
         lines.append("=" * 70)
         return "\n".join(lines)
 
+    def get_phase_cost(self, phase_name: str) -> float:
+        """Calculate estimated cost for a specific phase based on its tokens."""
+        if phase_name not in self.metrics.phases:
+            return 0.0
+        phase = self.metrics.phases[phase_name]
+        input_cost = (phase.llm_tokens_input / 1_000_000) * self.metrics.input_cost_per_million
+        output_cost = (phase.llm_tokens_output / 1_000_000) * self.metrics.output_cost_per_million
+        return input_cost + output_cost
+
     def get_phase_stats(self, phase_name: str) -> Optional[Dict]:
         """Get stats for a specific phase."""
         if phase_name not in self.metrics.phases:
@@ -406,3 +508,103 @@ class MetricsTracker:
             "estimated_cost": self.estimate_cost(),
             "phases": {name: self.get_phase_stats(name) for name in self.tracked_phases},
         }
+
+    def to_dict(self) -> dict:
+        """
+        Serialize metrics tracker state for checkpoint saving.
+
+        Note: Thread state (_display_thread, _stop_display) is NOT serialized.
+        The live display will be restarted on resume if enabled.
+
+        Returns:
+            Dictionary containing serializable metrics state
+        """
+        return {
+            "metrics": self.metrics.to_dict(),
+            "enable_live_display": self.enable_live_display,
+            "update_interval": self.update_interval,
+            "current_phase": self._current_phase,
+            "tracked_phases": list(self.tracked_phases),
+            "checkpoint_timestamp": time.time(),
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict,
+        resume_workflow: bool = False,
+    ) -> "MetricsTracker":
+        """
+        Restore metrics tracker from checkpoint data.
+
+        Args:
+            data: Dictionary from to_dict()
+            resume_workflow: If True, restarts the live display thread
+
+        Returns:
+            Restored MetricsTracker instance
+        """
+        # Validate data structure
+        if not isinstance(data, dict):
+            raise ValueError("Invalid metrics data: expected dict")
+
+        saved_metrics = data.get("metrics", {})
+        if not saved_metrics:
+            # No metrics data - return fresh tracker
+            return cls(
+                enable_live_display=data.get("enable_live_display", True),
+                update_interval=data.get("update_interval", 15),
+                phases=data.get("tracked_phases"),
+            )
+
+        # Extract cost rates from saved metrics
+        tracker = cls(
+            enable_live_display=data.get("enable_live_display", True),
+            update_interval=data.get("update_interval", 15),
+            input_cost_per_million=saved_metrics.get("input_cost_per_million", 3.00),
+            output_cost_per_million=saved_metrics.get("output_cost_per_million", 15.00),
+            embedding_cost_per_million=saved_metrics.get("embedding_cost_per_million", 0.10),
+            phases=data.get("tracked_phases"),
+        )
+
+        # Restore the metrics object (overwrite the fresh one)
+        tracker.metrics = WorkflowMetrics.from_dict(saved_metrics)
+
+        # Restore current phase
+        tracker._current_phase = data.get("current_phase")
+
+        # Handle interrupted phases (were running when checkpoint was saved)
+        checkpoint_time = data.get("checkpoint_timestamp", time.time())
+        for phase_name, phase in tracker.metrics.phases.items():
+            if phase.status == "running":
+                # Phase was interrupted - accumulate partial duration
+                if phase.start_time:
+                    partial_duration = checkpoint_time - phase.start_time
+                    phase.accumulated_duration += partial_duration
+                    phase.start_time = None
+                phase.status = "pending"  # Will be restarted
+
+        # If resuming, restart live display if workflow was in progress
+        if resume_workflow and tracker.enable_live_display:
+            if tracker.metrics.workflow_start and not tracker.metrics.workflow_end:
+                tracker._start_live_display()
+
+        return tracker
+
+    def resume_workflow(self):
+        """
+        Resume metrics tracking after checkpoint restore.
+
+        Unlike start_workflow(), this preserves the original workflow_start time
+        and only restarts the live display thread if needed.
+        """
+        if self.metrics.workflow_start is None:
+            # No previous workflow - start fresh
+            self.start_workflow()
+            return
+
+        # Workflow was previously started - just restart live display
+        if self.enable_live_display and self._display_thread is None:
+            self._start_live_display()
+
+        print(f"   Resumed metrics from original start time")

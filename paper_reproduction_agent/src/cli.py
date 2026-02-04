@@ -98,6 +98,7 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
         }
 
         # Try to resume from checkpoint
+        resumed_state = None
         if not no_checkpoints:
              resumed_state = orchestrator._try_resume_checkpoint(paper_input)
              if resumed_state:
@@ -138,8 +139,14 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
             if initial_state.get("custom_experiment_list"):
                 click.echo(f"   Experiments: {initial_state['custom_experiment_list']}")
 
-        # Start metrics tracking
-        orchestrator.metrics_tracker.start_workflow()
+        # Start/resume metrics tracking
+        if not no_checkpoints and resumed_state and orchestrator.metrics_tracker.metrics.workflow_start:
+            # Metrics were restored from checkpoint - resume (preserves original start time)
+            orchestrator.metrics_tracker.resume_workflow()
+            click.echo("   📊 Resumed metrics tracking (original start time preserved)")
+        else:
+            # Fresh start
+            orchestrator.metrics_tracker.start_workflow()
 
         try:
             result = orchestrator.workflow.invoke(initial_state)

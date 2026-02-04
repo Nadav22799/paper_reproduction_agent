@@ -109,30 +109,59 @@ class ExecutionAgent:
         if selected_datasets:
             print(f"   📋 Selected datasets to run: {selected_datasets}")
 
+        # RETRIEVE relevant context from previous agents (exclude own to prevent self-referencing)
+        previous_context = ""
+        if self.hierarchical_context:
+            previous_context = self.hierarchical_context.compile_context(
+                query="environment setup experiment execution python command smoke test",
+                max_tokens=3000,
+                exclude_sources=["execution"],
+            )
+            if previous_context:
+                print(f"   📋 Retrieved {len(previous_context)} chars of previous context")
+
         # Check for recovery context (OOM retry, etc.)
         is_retry = recovery_context and recovery_context.get("retry_count", 0) > 0
         reduce_batch = recovery_context.get("reduce_batch", False) if is_retry else False
 
-        # Read checklist to get tool and environment info
-        checklist_content = ""
-        tool_detected = ""
-        env_name = ""
+        # FIRST: Try programmatic context (more reliable than checklist text parsing)
+        env_context = state.get("agent_contexts", {}).get("environment_setup", {})
+        tool_detected = env_context.get("env_type", "")
+        env_name = env_context.get("env_name", "")
 
+        # Also try env_setup_results (full agent output)
+        if not tool_detected or not env_name:
+            env_results = state.get("env_setup_results", {})
+            if not tool_detected:
+                tool_detected = env_results.get("env_type", "")
+            if not env_name:
+                env_name = env_results.get("env_name", "")
+
+        if tool_detected and env_name:
+            print(f"   📋 From context - Tool: {tool_detected}, Env: {env_name}")
+
+        # Read checklist content (for experiments list)
+        checklist_content = ""
+
+        # FALLBACK: Read tool/env from checklist if not in context
         if checklist_path and os.path.exists(checklist_path):
             try:
                 with open(checklist_path, "r", encoding="utf-8") as f:
                     checklist_content = f.read()
 
-                # Extract tool and environment from checklist
-                tool_match = re.search(r"\*\*Tool Detected:\*\*\s*(\w+)", checklist_content)
-                if tool_match:
-                    tool_detected = tool_match.group(1).lower()
+                # Only use checklist values if context didn't have them
+                if not tool_detected:
+                    tool_match = re.search(r"\*\*Tool Detected:\*\*\s*(\w+)", checklist_content)
+                    if tool_match:
+                        tool_detected = tool_match.group(1).lower()
 
-                env_match = re.search(r"\*\*Environment Name:\*\*\s*(\S+)", checklist_content)
-                if env_match:
-                    env_name = env_match.group(1)
+                if not env_name:
+                    env_match = re.search(r"\*\*Environment Name:\*\*\s*(\S+)", checklist_content)
+                    if env_match:
+                        env_name = env_match.group(1)
 
-                print(f"   📋 From checklist - Tool: {tool_detected or 'not found'}, Env: {env_name or 'not found'}")
+                if tool_detected or env_name:
+                    print(f"   📋 From checklist - Tool: {tool_detected or 'not found'}, Env: {env_name or 'not found'}")
 
             except Exception as e:
                 print(f"⚠️  Could not read checklist: {e}")
@@ -231,6 +260,10 @@ Experiment Strategy: {self.experiment_strategy}
 {"⚠️ RETRY MODE: Previous attempt failed. " + ("Reduce batch size!" if reduce_batch else "") if is_retry else ""}
 {"Previous error: " + recovery_context.get("error_message", "")[:200] if is_retry else ""}
 
+=== CONTEXT FROM PREVIOUS AGENTS ===
+{previous_context if previous_context else "No previous context available - check checklist for environment info"}
+====================================
+
 STEPS:
 1. FIRST: Read reproduction_checklist.md to find:
    - **Tool Detected** (conda/micromamba/pip/poetry/uv)
@@ -282,17 +315,36 @@ Start by reading the checklist to confirm tool, environment, and experiment list
 
             # Analyze result to determine success and extract errors
             success, details, error_info, last_message = self._analyze_result(result, code_path)
+
+            # Store FULL messages in hierarchical context (including tool calls)
+            if self.hierarchical_context:
+                from ..utils.context_utils import build_context_entry
+
+                messages = result.get("messages", [])
+                exec_result = {
+                    "experiments_completed": success,
+                    "experiment_results": details,
+                    "tool": tool_detected,
+                    "env_name": env_name,
+                    "error": error_info.get("error_message") if not success else None,
+                }
+
+                context_entry = build_context_entry(
+                    agent_name="execution",
+                    result=exec_result,
+                    messages=messages,
+                    max_detail_tokens=5000,
+                )
+
+                self.hierarchical_context.add(
+                    content=context_entry,
+                    source="execution",
+                    entry_type="result" if success else "error",
+                    importance=1.0 if success else 0.9,
+                    lazy=True,
+                )
+
             if success:
-                # Store success in hierarchical context
-                if self.hierarchical_context:
-                    result_summary = str(details)[:500] if details else "Experiments completed"
-                    self.hierarchical_context.add(
-                        content=f"[Execution Success] {result_summary}",
-                        source="execution",
-                        entry_type="result",
-                        importance=1.0,
-                        lazy=True,  # Defer embedding to avoid loading SentenceTransformer
-                    )
                 return {
                     "experiments_completed": True,
                     "experiment_results": details,
@@ -304,17 +356,6 @@ Start by reading the checklist to confirm tool, environment, and experiment list
                 # Classify the error for routing
                 error_type = self._classify_error(error_info.get("error_message", ""))
                 failure_meta = self._create_failure_metadata(error_info, error_type, state)
-
-                # Store error in hierarchical context for recovery
-                if self.hierarchical_context:
-                    error_msg = error_info.get("error_message", "Unknown error")[:500]
-                    self.hierarchical_context.add(
-                        content=f"[Execution Error] Type: {error_type}\nMessage: {error_msg}",
-                        source="execution",
-                        entry_type="error",
-                        importance=0.9,
-                        lazy=True,  # Defer embedding to avoid loading SentenceTransformer
-                    )
 
                 return {
                     "experiments_completed": False,

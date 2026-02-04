@@ -522,6 +522,20 @@ Based on **Tool Detected** in checklist, use the correct pattern:
 DO NOT guess the tool - READ THE CHECKLIST!
 
 ═══════════════════════════════════════════════════════════════
+CRITICAL: USE ABSOLUTE PATHS FOR SCRIPTS
+═══════════════════════════════════════════════════════════════
+
+ALWAYS use ABSOLUTE PATHS when running Python scripts!
+
+ML scripts often load data using relative paths. Using absolute paths ensures
+data files are found correctly regardless of working directory.
+
+✅ CORRECT: {tool} run -n {env} python {REPO_PATH}/{SCRIPT_PATH} {args}
+❌ WRONG:   {tool} run -n {env} python {SCRIPT_PATH} {args}
+
+Combine the repository path with the script's relative path to get the absolute path.
+
+═══════════════════════════════════════════════════════════════
 CRITICAL: BACKGROUND PROCESS PATTERN
 ═══════════════════════════════════════════════════════════════
 

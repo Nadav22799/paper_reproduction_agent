@@ -174,6 +174,9 @@ class PaperReproductionOrchestrator:
         self.reasoning_llm = create_llm(temperature=0.3, include_thoughts=True)
         self.config = ReproductionConfig()
 
+        # Caching support (initialized after paper analysis)
+        self.cache_name: Optional[str] = None
+
         # Determine which architecture to use
         if use_supervisor is None:
             use_supervisor = os.getenv("USE_SUPERVISOR_ARCHITECTURE", "false").lower() == "true"
@@ -240,8 +243,8 @@ class PaperReproductionOrchestrator:
         )
         print("🧠 Hierarchical context manager initialized")
 
-        # Start metrics tracking immediately
-        self.metrics_tracker.start_workflow()
+        # NOTE: Do NOT call start_workflow() here - it should be called by
+        # CLI/run() AFTER checkpoint restore to prevent orphan display threads
 
         # Initialize legacy agents (always needed for backward compatibility)
         self.env_setup_agent = EnvironmentSetupAgent(
@@ -249,6 +252,7 @@ class PaperReproductionOrchestrator:
             max_iterations=50,
             metrics_tracker=self.metrics_tracker,
             callbacks=[self.logging_callback] if self.logging_callback else [],
+            hierarchical_context=self.hierarchical_context,
         )
         self.unified_reproducer = UnifiedReproductionAgent(
             self.llm,
@@ -319,6 +323,43 @@ class PaperReproductionOrchestrator:
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
         )
+
+    def _update_metrics_tracker_references(self, new_tracker):
+        """
+        Update all agent and callback references to use the new metrics tracker.
+
+        This is critical when restoring from checkpoint - the restored tracker
+        has accumulated historical data, but all agents/callbacks still reference
+        the original (now orphaned) tracker. Without this update, new tokens
+        would be recorded to the old tracker while summaries read from the new one.
+        """
+        self.metrics_tracker = new_tracker
+
+        # Update logging callback (records tokens from all LLM calls)
+        if self.logging_callback:
+            self.logging_callback.metrics_tracker = new_tracker
+
+        # Update legacy agents
+        if hasattr(self, 'env_setup_agent') and self.env_setup_agent:
+            self.env_setup_agent.metrics_tracker = new_tracker
+        if hasattr(self, 'unified_reproducer') and self.unified_reproducer:
+            self.unified_reproducer.metrics_tracker = new_tracker
+        if hasattr(self, 'discovery_agent') and self.discovery_agent:
+            self.discovery_agent.metrics_tracker = new_tracker
+
+        # Update supervisor architecture agents
+        if hasattr(self, 'supervisor_agent') and self.supervisor_agent:
+            self.supervisor_agent.metrics_tracker = new_tracker
+        if hasattr(self, 'planning_agent') and self.planning_agent:
+            self.planning_agent.metrics_tracker = new_tracker
+        if hasattr(self, 'critic_agent') and self.critic_agent:
+            self.critic_agent.metrics_tracker = new_tracker
+        if hasattr(self, 'data_prep_agent') and self.data_prep_agent:
+            self.data_prep_agent.metrics_tracker = new_tracker
+        if hasattr(self, 'execution_agent') and self.execution_agent:
+            self.execution_agent.metrics_tracker = new_tracker
+        if hasattr(self, 'validation_agent') and self.validation_agent:
+            self.validation_agent.metrics_tracker = new_tracker
 
     def _build_workflow(self) -> StateGraph:
         """Build the LangGraph workflow based on architecture setting."""
@@ -1047,6 +1088,15 @@ class PaperReproductionOrchestrator:
             # Print analysis summary
             self._print_analysis_summary(state, analysis)
 
+            # Enable prompt caching with paper content for cost savings
+            paper_context = state.get("agent_contexts", {}).get("paper_analyzer", "")
+            paper_results_str = str(state.get("paper_results", {}))
+            if paper_context:
+                self._enable_caching(
+                    paper_content=paper_context,
+                    paper_results=paper_results_str,
+                )
+
             # Fallback discovery is now handled by DiscoveryAgent in the next node
             if not state["code_references"]:
                 print("   (Code discovery deferred to Discovery Agent)")
@@ -1140,6 +1190,66 @@ class PaperReproductionOrchestrator:
 
         except Exception as e:
             print(f"   ⚠️  Warning: Failed to store paper context: {e}")
+
+    def _enable_caching(self, paper_content: str, readme_content: str = "", paper_results: str = ""):
+        """Enable prompt caching after paper analysis.
+
+        For Gemini: Creates an explicit cache via google-genai and refreshes LLMs.
+        For Claude: Caching is automatic via the beta header (already enabled in llm_factory).
+        """
+        from .utils.llm_factory import create_gemini_cache, create_llm, get_provider
+
+        try:
+            provider = get_provider()
+
+            if provider == "gemini":
+                # Create Gemini cache
+                self.cache_name = create_gemini_cache(
+                    paper_content=paper_content,
+                    readme_content=readme_content,
+                    paper_results=paper_results,
+                    paper_id=getattr(self, "paper_title", "unknown")[:50],
+                )
+
+                if self.cache_name:
+                    # Refresh LLMs with caching
+                    self.llm = create_llm(temperature=0.1, cached_content=self.cache_name)
+                    self.reasoning_llm = create_llm(
+                        temperature=0.3,
+                        include_thoughts=True,
+                        cached_content=self.cache_name,
+                    )
+                    self._refresh_agent_llms()
+                    print("Gemini caching enabled for subsequent agent calls")
+
+            elif provider == "claude":
+                # Claude caching is automatic via cache_control in messages
+                # No explicit cache creation needed - just use cache_control markers
+                print("Claude caching enabled (automatic via headers)")
+
+        except Exception as e:
+            print(f"Warning: Failed to enable caching: {e}")
+
+    def _refresh_agent_llms(self):
+        """Refresh agent LLMs after caching is enabled."""
+        # Update legacy agents
+        if hasattr(self, "env_setup_agent"):
+            self.env_setup_agent.llm = self.reasoning_llm
+        if hasattr(self, "unified_reproducer"):
+            self.unified_reproducer.llm = self.llm
+
+        # Update supervisor architecture agents if enabled
+        if self.use_supervisor:
+            if hasattr(self, "supervisor_agent"):
+                self.supervisor_agent.llm = self.reasoning_llm
+            if hasattr(self, "planning_agent"):
+                self.planning_agent.llm = self.reasoning_llm
+            if hasattr(self, "data_prep_agent"):
+                self.data_prep_agent.llm = self.llm
+            if hasattr(self, "execution_agent"):
+                self.execution_agent.llm = self.llm
+            if hasattr(self, "validation_agent"):
+                self.validation_agent.llm = self.llm
 
     def _print_analysis_summary(self, state, analysis):
         """Print detailed analysis results."""
@@ -2160,6 +2270,10 @@ class PaperReproductionOrchestrator:
                 self.hierarchical_context.to_dict()
                 if self.hierarchical_context else None
             ),
+            # Metrics tracker state for cost/duration preservation across resumes
+            "metrics_tracker_state": self.metrics_tracker.to_dict(),
+            # Gemini cache name (may be expired but worth attempting on resume)
+            "cache_name": getattr(self, "cache_name", None),
         }
 
         self.checkpoint_manager.save(
@@ -2498,6 +2612,36 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                 except Exception as e:
                     print(f"   ⚠️ Failed to restore hierarchical context: {e}")
                     # Continue with fresh context - non-fatal
+
+            # Restore metrics tracker if available
+            metrics_state = state.pop("metrics_tracker_state", None)
+            if metrics_state:
+                try:
+                    from .utils.metrics_tracker import MetricsTracker
+                    restored_tracker = MetricsTracker.from_dict(
+                        metrics_state,
+                        resume_workflow=False  # We'll call resume_workflow() later
+                    )
+
+                    # Update ALL references (orchestrator, agents, callbacks) to use restored tracker
+                    # This is critical - without this, new tokens go to old tracker while summary uses new
+                    self._update_metrics_tracker_references(restored_tracker)
+
+                    cost = self.metrics_tracker.estimate_cost()
+                    tokens = (
+                        self.metrics_tracker.metrics.total_llm_tokens_input +
+                        self.metrics_tracker.metrics.total_llm_tokens_output
+                    )
+                    print(f"   💰 Restored metrics: ${cost:.4f} cost, {tokens:,} tokens")
+                except Exception as e:
+                    print(f"   ⚠️ Failed to restore metrics: {e}")
+                    # Continue with fresh tracker - non-fatal
+
+            # Restore Gemini cache name if available
+            restored_cache = state.pop("cache_name", None)
+            if restored_cache:
+                self.cache_name = restored_cache
+                print(f"   🗄️ Restored cache name: {restored_cache[:50]}...")
 
             completed_phases = state.get("completed_phases", [])
 

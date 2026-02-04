@@ -26,16 +26,25 @@ from ..tools.file_utils import (
 from langchain_community.tools import DuckDuckGoSearchRun
 from ..utils.llm_factory import create_llm
 from ..utils.logging_callback import LoggingCallbackHandler
+from ..utils.hierarchical_context import HierarchicalContextManager
 
 
 class EnvironmentSetupAgent:
     """Specialized agent for environment preparation and setup."""
 
-    def __init__(self, llm=None, max_iterations=50, metrics_tracker=None, callbacks=None):
+    def __init__(
+        self,
+        llm=None,
+        max_iterations=50,
+        metrics_tracker=None,
+        callbacks=None,
+        hierarchical_context: HierarchicalContextManager = None,
+    ):
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
         self.callbacks = callbacks or []
+        self.hierarchical_context = hierarchical_context
 
         from ..config.prompts import ENVIRONMENT_AGENT_PROMPT
         self.system_prompt = ENVIRONMENT_AGENT_PROMPT
@@ -97,6 +106,18 @@ class EnvironmentSetupAgent:
         print(f"📄 Paper: {paper_title or 'N/A'}")
         print()
 
+        # RETRIEVE relevant context from previous agents (especially for recovery)
+        # IMPORTANT: Exclude own source to prevent self-referencing (seeing own "Smoke Test: PASSED")
+        previous_context = ""
+        if self.hierarchical_context:
+            previous_context = self.hierarchical_context.compile_context(
+                query="environment setup python conda pip micromamba error",
+                max_tokens=1500,
+                exclude_sources=["environment_setup"],
+            )
+            if previous_context:
+                print(f"   📋 Retrieved {len(previous_context)} chars of previous context")
+
         # Build task prompt
         task_parts = [
             "Your task: Prepare the environment for running ML experiments.",
@@ -109,6 +130,17 @@ class EnvironmentSetupAgent:
             task_parts.append("Use this date to determine compatible package versions.")
         else:
             task_parts.append("Paper date unknown - use common compatible versions.")
+
+        # Add context from previous attempts if available (helps with recovery)
+        if previous_context:
+            task_parts.extend(
+                [
+                    "",
+                    "=== CONTEXT FROM PREVIOUS ATTEMPTS ===",
+                    previous_context,
+                    "=======================================",
+                ]
+            )
 
         task_parts.extend(
             [
@@ -137,9 +169,13 @@ class EnvironmentSetupAgent:
 
         # Run agent
         try:
-            # Prepare callbacks list, combining internal logging with any provided callbacks
-            invoke_callbacks = list(self.callbacks) # Start with user-provided callbacks
-            invoke_callbacks.append(LoggingCallbackHandler(metrics_tracker=self.metrics_tracker))
+            # Use provided callbacks (orchestrator already includes LoggingCallbackHandler with
+            # verbose logging AND file logging). Only create our own as fallback if none provided.
+            if self.callbacks:
+                invoke_callbacks = list(self.callbacks)
+            else:
+                # Fallback: create callback if none provided (e.g., standalone usage)
+                invoke_callbacks = [LoggingCallbackHandler(metrics_tracker=self.metrics_tracker)]
 
             result = self.agent.invoke(
                 {
@@ -155,6 +191,24 @@ class EnvironmentSetupAgent:
 
             # Parse results from agent conversation
             result_summary = self._parse_agent_results(result)
+
+            # Store results in hierarchical context for next agent
+            if self.hierarchical_context:
+                from ..utils.context_utils import build_context_entry
+
+                messages = result.get("messages", [])
+                context_entry = build_context_entry(
+                    agent_name="environment_setup",
+                    result=result_summary,
+                    messages=messages,
+                    max_detail_tokens=5000,
+                )
+                self.hierarchical_context.add(
+                    content=context_entry,
+                    source="environment_setup",
+                    entry_type="result" if result_summary.get("success") else "error",
+                    importance=0.9,
+                )
 
             print("\n" + "=" * 60)
             print("✅ Environment Setup Complete")
@@ -190,11 +244,28 @@ class EnvironmentSetupAgent:
         messages = agent_result.get("messages", [])
 
         # Extract last_message for reasoning output
+        # Handle structured content blocks (e.g., {'type': 'thinking', 'thinking': '...'})
         last_message = ""
         if messages:
             last_msg = messages[-1]
             if hasattr(last_msg, "content"):
-                last_message = last_msg.content
+                if isinstance(last_msg.content, list):
+                    # Handle list of content blocks (Gemini, Claude structured responses)
+                    text_parts = []
+                    for part in last_msg.content:
+                        if isinstance(part, str):
+                            text_parts.append(part)
+                        elif isinstance(part, dict):
+                            # Extract text from various block types
+                            if "text" in part:
+                                text_parts.append(part["text"])
+                            elif "thinking" in part:
+                                text_parts.append(part["thinking"])
+                            elif "content" in part:
+                                text_parts.append(part["content"])
+                    last_message = "\n".join(text_parts)
+                else:
+                    last_message = str(last_msg.content)
 
         # Default result
         result = {
@@ -209,9 +280,39 @@ class EnvironmentSetupAgent:
             "last_message": last_message,  # Agent reasoning for verbose output
         }
 
+        # Helper function to extract text from message content
+        def extract_text_from_content(content) -> str:
+            """Extract text from message content, handling structured blocks."""
+            if isinstance(content, str):
+                return content
+            elif isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, str):
+                        text_parts.append(part)
+                    elif isinstance(part, dict):
+                        # Extract text from various block types
+                        if "text" in part:
+                            text_parts.append(part["text"])
+                        elif "thinking" in part:
+                            text_parts.append(part["thinking"])
+                        elif "content" in part:
+                            text_parts.append(part["content"])
+                return "\n".join(text_parts)
+            else:
+                return str(content)
+
         # Search for key indicators in agent messages
+        # CRITICAL: Exclude HumanMessage from success detection!
+        # HumanMessage contains the input prompt which includes previous context from
+        # hierarchical storage. If that context has "smoke test passed" from a prior run,
+        # it causes false positive success detection. Only check AI and Tool messages.
         full_conversation = "\n".join(
-            [str(m.content) if hasattr(m, "content") else str(m) for m in messages]
+            [
+                extract_text_from_content(m.content) if hasattr(m, "content") else str(m)
+                for m in messages
+                if not isinstance(m, HumanMessage)  # Exclude input prompts
+            ]
         )
         full_conversation_lower = full_conversation.lower()
 
@@ -302,15 +403,57 @@ class EnvironmentSetupAgent:
         # Try to extract environment name
         import re
 
-        # Look for conda environment name
-        conda_match = re.search(r"conda.*?-n\s+(\w+)", full_conversation)
-        if conda_match:
-            result["env_name"] = conda_match.group(1)
-            result["env_type"] = "conda"
+        # PRIORITY 1: Look for "run" commands (the actual working command for smoke test)
+        # This is what execution agent needs - the env that was successfully used
+        micromamba_run = re.findall(
+            r"micromamba\s+run\s+-n\s+(\w+)",
+            full_conversation,
+        )
+        mamba_run = re.findall(
+            r"(?<!micro)mamba\s+run\s+-n\s+(\w+)",
+            full_conversation,
+        )
+        conda_run = re.findall(
+            r"conda\s+run\s+-n\s+(\w+)",
+            full_conversation,
+        )
 
-        # Look for venv path
-        venv_match = re.search(r"(\.?/?\w*/venv)", full_conversation)
-        if venv_match and not result["env_name"]:
+        if micromamba_run:
+            result["env_name"] = micromamba_run[-1]  # Take LAST run command
+            result["env_type"] = "micromamba"
+        elif mamba_run:
+            result["env_name"] = mamba_run[-1]
+            result["env_type"] = "mamba"
+        elif conda_run:
+            result["env_name"] = conda_run[-1]
+            result["env_type"] = "conda"
+        # PRIORITY 2: Fall back to create/activate commands if no run found
+        elif (
+            micromamba_create := re.findall(
+                r"micromamba\s+(?:create|activate|env\s+create).*?-n\s+(\w+)",
+                full_conversation,
+            )
+        ):
+            result["env_name"] = micromamba_create[-1]
+            result["env_type"] = "micromamba"
+        elif (
+            mamba_create := re.findall(
+                r"(?<!micro)mamba\s+(?:create|activate|env\s+create).*?-n\s+(\w+)",
+                full_conversation,
+            )
+        ):
+            result["env_name"] = mamba_create[-1]
+            result["env_type"] = "mamba"
+        elif (
+            conda_create := re.findall(
+                r"conda\s+(?:create|activate|env\s+create).*?-n\s+(\w+)",
+                full_conversation,
+            )
+        ):
+            result["env_name"] = conda_create[-1]
+            result["env_type"] = "conda"
+        # PRIORITY 3: Look for venv path
+        elif venv_match := re.search(r"(\.?/?\w*/venv)", full_conversation):
             result["env_name"] = venv_match.group(1)
             result["env_type"] = "venv"
 

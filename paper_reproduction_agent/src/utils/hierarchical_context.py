@@ -423,6 +423,7 @@ class HierarchicalContextManager:
         max_tokens: Optional[int] = None,
         include_cold: bool = True,
         min_relevance: float = 0.0,
+        exclude_sources: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant context using multi-factor scoring.
@@ -435,6 +436,7 @@ class HierarchicalContextManager:
             max_tokens: Maximum tokens to return (defaults to half of max_tokens)
             include_cold: Whether to include cold summaries
             min_relevance: Minimum relevance score to include (0.0 to 1.0)
+            exclude_sources: List of source names to exclude (prevents self-referencing)
 
         Returns:
             List of context entries with relevance scores
@@ -456,6 +458,9 @@ class HierarchicalContextManager:
         # Score hot entries (in-memory, fast)
         for entry in self.hot_context.values():
             if entry.id in seen_ids:
+                continue
+            # Skip entries from excluded sources (prevents self-referencing)
+            if exclude_sources and entry.source in exclude_sources:
                 continue
             seen_ids.add(entry.id)
 
@@ -513,6 +518,10 @@ class HierarchicalContextManager:
                                     "tokens", self.count_tokens(content)
                                 ),
                             )
+
+                            # Skip entries from excluded sources (prevents self-referencing)
+                            if exclude_sources and entry.source in exclude_sources:
+                                continue
 
                             # ChromaDB returns distance, convert to similarity
                             semantic_score = max(0.0, 1 - distance)
@@ -587,7 +596,11 @@ class HierarchicalContextManager:
         return selected
 
     def compile_context(
-        self, query: str, system_prompt: str = "", max_tokens: Optional[int] = None
+        self,
+        query: str,
+        system_prompt: str = "",
+        max_tokens: Optional[int] = None,
+        exclude_sources: Optional[List[str]] = None,
     ) -> str:
         """
         Compile final context string for LLM consumption.
@@ -599,6 +612,7 @@ class HierarchicalContextManager:
             query: Query/task description for relevance scoring
             system_prompt: System prompt to account for in budget
             max_tokens: Total token budget (defaults to self.max_tokens)
+            exclude_sources: List of source names to exclude (prevents self-referencing)
 
         Returns:
             Formatted context string
@@ -615,8 +629,8 @@ class HierarchicalContextManager:
             logger.warning("No token budget available for context")
             return ""
 
-        # Retrieve relevant context
-        relevant = self.retrieve(query, max_tokens=available)
+        # Retrieve relevant context (excluding self-referencing sources if specified)
+        relevant = self.retrieve(query, max_tokens=available, exclude_sources=exclude_sources)
 
         if not relevant:
             return ""

@@ -97,45 +97,38 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                 self._log(f"\n💭 Reasoning (LLM Output):\n{thoughts}\n")
 
         # Track token usage if metrics_tracker is provided
+        # IMPORTANT: Record tokens only ONCE - LangChain often puts the same data
+        # in multiple places (llm_output, usage_metadata, response_metadata, etc.)
         if self.metrics_tracker:
+            recorded = False
             try:
-                # 1. Check llm_output (Standard LangChain/OpenAI)
+                # Priority 1: llm_output (Standard LangChain/OpenAI)
                 if hasattr(response, "llm_output") and response.llm_output:
                     usage = response.llm_output.get(
                         "token_usage", {}
                     ) or response.llm_output.get("usage_metadata", {})
-                    if self._record_usage_from_dict(usage):
-                        pass
+                    recorded = self._record_usage_from_dict(usage)
 
-                # 2. Check generations (Gemini/Anthropic/Others)
-                if hasattr(response, "generations") and response.generations:
+                # Priority 2: generations (Gemini/Anthropic/Others) - only if not already recorded
+                if not recorded and hasattr(response, "generations") and response.generations:
                     for gen_list in response.generations:
+                        if recorded:
+                            break
                         for gen in gen_list:
-                            # Check 2a: message.usage_metadata (Newer LangChain, verified for Gemini)
-                            if hasattr(gen, "message") and hasattr(
-                                gen.message, "usage_metadata"
-                            ):
-                                if self._record_usage_from_dict(
-                                    gen.message.usage_metadata
-                                ):
-                                    pass
-
-                            # Check 2b: generation_info (Older LangChain/Some wrappers)
-                            if hasattr(gen, "generation_info") and gen.generation_info:
+                            if recorded:
+                                break
+                            # Try message.usage_metadata first (Newer LangChain, verified for Gemini)
+                            if hasattr(gen, "message") and hasattr(gen.message, "usage_metadata"):
+                                recorded = self._record_usage_from_dict(gen.message.usage_metadata)
+                            # Then generation_info (Older LangChain/Some wrappers)
+                            if not recorded and hasattr(gen, "generation_info") and gen.generation_info:
                                 usage = gen.generation_info.get("usage_metadata", {})
-                                if self._record_usage_from_dict(usage):
-                                    pass
-
-                            # Check 2c: message.response_metadata (Fallback)
-                            if hasattr(gen, "message") and hasattr(
-                                gen.message, "response_metadata"
-                            ):
+                                recorded = self._record_usage_from_dict(usage)
+                            # Finally response_metadata (Fallback)
+                            if not recorded and hasattr(gen, "message") and hasattr(gen.message, "response_metadata"):
                                 meta = gen.message.response_metadata
-                                usage = meta.get("token_usage", {}) or meta.get(
-                                    "usage", {}
-                                )
-                                if self._record_usage_from_dict(usage):
-                                    pass
+                                usage = meta.get("token_usage", {}) or meta.get("usage", {})
+                                recorded = self._record_usage_from_dict(usage)
 
             except Exception:
                 pass  # Token tracking is best-effort

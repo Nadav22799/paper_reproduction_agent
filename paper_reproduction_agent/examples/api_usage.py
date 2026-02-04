@@ -22,7 +22,7 @@ def example_reproduce_paper_from_arxiv():
 
     result = orchestrator.run(f"arxiv:{arxiv_id}")
 
-    print("\n✅ Reproduction complete!")
+    print("\nReproduction complete!")
     print(f"Status: {result['final_status']}")
     print(f"Results match paper: {result['results_match']}")
 
@@ -39,9 +39,9 @@ def example_reproduce_paper_from_pdf():
 
     if os.path.exists(pdf_path):
         result = orchestrator.run(pdf_path)
-        print("\n✅ Reproduction complete!")
+        print("\nReproduction complete!")
     else:
-        print(f"⚠️  PDF not found at {pdf_path}")
+        print(f"PDF not found at {pdf_path}")
 
 
 def example_use_individual_agents():
@@ -49,71 +49,35 @@ def example_use_individual_agents():
     print("\nExample 3: Using individual agents")
     print("=" * 60)
 
-    from src.agents.paper_analyzer import PaperAnalyzerAgent
-    from src.agents.code_searcher import CodeSearcherAgent
+    from paper_reproduction_agent.src.agents.unified_paper_analyzer import UnifiedPaperAnalyzer
+    from paper_reproduction_agent.src.utils.llm_factory import create_llm
 
-    # Initialize agents
-    analyzer = PaperAnalyzerAgent()
-    searcher = CodeSearcherAgent()
+    # Initialize analyzer with default LLM
+    llm = create_llm()
+    analyzer = UnifiedPaperAnalyzer(llm)
 
     # Analyze a paper
     arxiv_id = "2010.11929"  # Vision Transformer
-    print(f"\n📄 Analyzing paper {arxiv_id}...")
-    analysis = analyzer.analyze_paper(f"arxiv:{arxiv_id}")
+    print(f"\nAnalyzing paper {arxiv_id}...")
 
-    print(f"Paper title: {analysis.get('paper_metadata', {}).get('title', 'N/A')}")
-    print(f"Algorithms found: {len(analysis.get('algorithms', []))}")
+    # Note: You'd need to fetch the paper content first
+    # This is a simplified example
+    paper_content = "Vision Transformer (ViT) paper content would go here..."
+    analysis = analyzer.analyze_paper(paper_content, "Vision Transformer")
 
-    # Search for implementations
-    print("\n🔍 Searching for implementations...")
-    paper_title = analysis.get('paper_metadata', {}).get('title', '')
-    if paper_title:
-        search_results = searcher.search_implementations(paper_title)
-        print(f"Found {len(search_results.get('repositories', []))} repositories")
-
-
-def example_verify_existing_code():
-    """Example: Verify an existing implementation."""
-    print("\nExample 4: Verifying existing code")
-    print("=" * 60)
-
-    from src.agents.code_verifier import CodeVerifierAgent
-
-    verifier = CodeVerifierAgent()
-
-    # Path to code you want to verify
-    code_path = "./existing_implementation"
-
-    # Expected results from paper
-    paper_results = {
-        "accuracy": 0.95,
-        "f1_score": 0.93,
-        "precision": 0.94,
-    }
-
-    if os.path.exists(code_path):
-        print(f"Verifying code at {code_path}...")
-        verification = verifier.verify_implementation(code_path, paper_results)
-
-        print(f"\n{'✅' if verification['results_match_paper'] else '❌'} Verification result:")
-        print(f"Execution successful: {verification['execution_successful']}")
-        print(f"Results match paper: {verification['results_match_paper']}")
-    else:
-        print(f"⚠️  Code not found at {code_path}")
+    print(f"Core contribution: {analysis.get('core_contribution', 'N/A')[:100]}...")
+    print(f"Datasets found: {len(analysis.get('datasets', []))}")
 
 
 def example_reproduce_with_custom_llm():
-    """Example: Use custom LLM configuration."""
-    print("\nExample 5: Using custom LLM")
+    """Example: Use custom LLM configuration via factory."""
+    print("\nExample 4: Using custom LLM configuration")
     print("=" * 60)
 
-    from langchain_openai import ChatOpenAI
+    from paper_reproduction_agent.src.utils.llm_factory import create_llm
 
-    # Use a different model or temperature
-    custom_llm = ChatOpenAI(
-        model="gpt-4-turbo-preview",
-        temperature=0.0,  # More deterministic
-    )
+    # Use factory with custom temperature
+    custom_llm = create_llm(temperature=0.0)  # More deterministic
 
     orchestrator = PaperReproductionOrchestrator(llm=custom_llm)
 
@@ -130,9 +94,12 @@ def main():
     print("=" * 60)
 
     # Check environment variables
-    if not os.getenv("OPENAI_API_KEY"):
-        print("\n⚠️  Warning: OPENAI_API_KEY not set!")
-        print("Please copy .env.example to .env and add your API key")
+    has_gemini = bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
+    has_claude = bool(os.getenv("ANTHROPIC_API_KEY"))
+
+    if not (has_gemini or has_claude):
+        print("\nWarning: No LLM API key set!")
+        print("Please set GOOGLE_API_KEY/GEMINI_API_KEY or ANTHROPIC_API_KEY")
         return
 
     try:
@@ -142,11 +109,10 @@ def main():
         # example_reproduce_paper_from_arxiv()
         # example_reproduce_paper_from_pdf()
         example_use_individual_agents()
-        # example_verify_existing_code()
         # example_reproduce_with_custom_llm()
 
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
 

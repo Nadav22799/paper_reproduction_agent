@@ -84,6 +84,17 @@ class DataPrepAgent:
 
         print("📦 Data Prep Agent: Preparing datasets...")
 
+        # RETRIEVE relevant context from previous agents (exclude own to prevent self-referencing)
+        previous_context = ""
+        if self.hierarchical_context:
+            previous_context = self.hierarchical_context.compile_context(
+                query="data download dataset path environment setup smoke test",
+                max_tokens=1500,
+                exclude_sources=["data_prep"],
+            )
+            if previous_context:
+                print(f"   📋 Retrieved {len(previous_context)} chars of previous context")
+
         # Read checklist to understand requirements
         checklist_content = ""
         if checklist_path and os.path.exists(checklist_path):
@@ -108,6 +119,10 @@ class DataPrepAgent:
 
 Repository Path: {code_path}
 Environment Name: {env_name if env_name else "Check checklist for environment info"}
+
+=== CONTEXT FROM PREVIOUS AGENTS ===
+{previous_context if previous_context else "No previous context available"}
+====================================
 
 Current Checklist:
 {checklist_content[:3000] if checklist_content else "No checklist found"}
@@ -155,6 +170,31 @@ Start by analyzing the provided context."""
 
             # Analyze result to determine success
             success, details, last_message = self._analyze_result(result, code_path)
+
+            # Store FULL messages in hierarchical context (including tool calls)
+            if self.hierarchical_context:
+                from ..utils.context_utils import build_context_entry
+
+                messages = result.get("messages", [])
+                data_result = {
+                    "datasets_ready": success,
+                    "dataset_results": details,
+                }
+
+                context_entry = build_context_entry(
+                    agent_name="data_prep",
+                    result=data_result,
+                    messages=messages,
+                    max_detail_tokens=4000,
+                )
+
+                self.hierarchical_context.add(
+                    content=context_entry,
+                    source="data_prep",
+                    entry_type="result" if success else "error",
+                    importance=0.8,
+                    lazy=True,
+                )
 
             if success:
                 return {

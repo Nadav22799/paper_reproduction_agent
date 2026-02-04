@@ -71,21 +71,40 @@ class SupervisorAgent:
         if phase_status.get("environment") != "completed":
             return {"agent": "environment", "directive": "Setup environment and verify with smoke test"}
 
-        # Data preparation - check if it should be skipped
+        # Data preparation - DEFAULT: SKIP unless explicitly required
+        # This makes data_prep REACTIVE (triggered by execution failure) not PROACTIVE
         if phase_status.get("data_prep") != "completed":
-            # Check if planning determined data prep can be skipped
+
+            # SKIP CONDITION 1: Environment smoke test passed (data already works!)
+            env_results = state.get("env_setup_results", {})
+            if env_results.get("success"):
+                print("   ⏭️  Skipping data_prep (Environment smoke test already passed)")
+                return {
+                    "agent": "data_prep_skip",
+                    "directive": "Data prep skipped - environment smoke test already verified functionality",
+                }
+
+            # SKIP CONDITION 2: Planning explicitly said skip
             reproduction_plan = state.get("reproduction_plan", {})
             skip_data_prep = reproduction_plan.get("skip_data_prep", False)
-
             if skip_data_prep:
-                # Auto-mark as completed and move to execution
                 print("   ⏭️  Skipping data_prep (scripts auto-download data)")
                 return {
                     "agent": "data_prep_skip",
                     "directive": "Data prep skipped - scripts handle data download automatically",
                 }
 
-            return {"agent": "data_prep", "directive": "Prepare datasets following checklist"}
+            # ONLY RUN DATA_PREP IF: Planning found explicit data prep instructions in README
+            requires_data_prep = reproduction_plan.get("requires_data_prep", False)
+            if requires_data_prep:
+                return {"agent": "data_prep", "directive": "Prepare datasets following checklist"}
+
+            # DEFAULT: Skip data_prep, execution will fail-back if needed
+            print("   ⏭️  Skipping data_prep (no explicit data prep required)")
+            return {
+                "agent": "data_prep_skip",
+                "directive": "Data prep skipped - execution will route back if data issues occur",
+            }
 
         # Execution
         if phase_status.get("execution") != "completed":

@@ -227,6 +227,17 @@ After creating the checklist, respond with a summary of what you found.
         if paper_datasets:
             print(f"   📋 Datasets from paper: {paper_datasets}")
 
+        # RETRIEVE relevant context (paper analysis, previous attempts - exclude own to prevent self-referencing)
+        previous_context = ""
+        if self.hierarchical_context:
+            previous_context = self.hierarchical_context.compile_context(
+                query="paper analysis datasets experiments requirements environment",
+                max_tokens=2000,
+                exclude_sources=["planning"],
+            )
+            if previous_context:
+                print(f"   📋 Retrieved {len(previous_context)} chars of previous context")
+
         # Select which experiments to include based on mode
         selected_experiments = self._select_experiments_by_mode(
             experiment_mode, custom_experiments, paper_datasets, paper_metrics
@@ -296,6 +307,10 @@ Repository URL: {repo_url}
 Paper Context (from analyzer):
 {paper_context[:2000] if paper_context else "Not available"}
 
+=== CONTEXT FROM PREVIOUS AGENTS ===
+{previous_context if previous_context else "No previous context available"}
+====================================
+
 STEPS:
 1. First, list the directory to see the structure
 2. Read README.md thoroughly
@@ -357,13 +372,42 @@ Start by listing the repository contents."""
             plan["selected_experiments"] = selected_experiments
             plan["selected_datasets"] = selected_datasets
 
+            # Store FULL messages in hierarchical context (including tool calls)
+            if self.hierarchical_context:
+                from ..utils.context_utils import build_context_entry
+
+                planning_result = {
+                    "plan_created": True,
+                    "skip_data_prep": plan.get("skip_data_prep", False),
+                    "selected_datasets": selected_datasets,
+                    "experiment_mode": experiment_mode,
+                }
+
+                context_entry = build_context_entry(
+                    agent_name="planning",
+                    result=planning_result,
+                    messages=messages,
+                    max_detail_tokens=4000,
+                )
+
+                self.hierarchical_context.add(
+                    content=context_entry,
+                    source="planning",
+                    entry_type="result",
+                    importance=0.85,
+                    lazy=True,
+                )
+
             # Ensure checklist was created
             checklist_path = os.path.join(code_path, "reproduction_checklist.md")
             if not os.path.exists(checklist_path):
                 # Create a basic checklist if agent didn't
+                # Skip data prep by default (reactive mode) unless explicitly required
+                should_skip_data_prep = not plan.get("requires_data_prep", False)
                 self._create_basic_checklist(
                     checklist_path, paper_title, repo_url,
-                    experiment_mode, selected_experiments
+                    experiment_mode, selected_experiments,
+                    skip_data_prep=should_skip_data_prep
                 )
 
             return {
@@ -384,9 +428,11 @@ Start by listing the repository contents."""
             print(f"⚠️  Planning Agent error: {e}")
             # Return minimal plan on error
             checklist_path = os.path.join(code_path, "reproduction_checklist.md")
+            # Default to reactive mode (skip data prep) on error
             self._create_basic_checklist(
                 checklist_path, paper_title, repo_url,
-                experiment_mode, selected_experiments
+                experiment_mode, selected_experiments,
+                skip_data_prep=True  # Reactive mode by default
             )
 
             return {
@@ -497,6 +543,7 @@ Preserve the existing structure and add the new items.
             "main_experiment_cmd": None,
             "notes": [],
             "skip_data_prep": False,  # Default to not skipping
+            "requires_data_prep": False,  # Only True if README has explicit data prep steps
         }
 
         # Try to read checklist to extract skip_data_prep flag
@@ -509,6 +556,10 @@ Preserve the existing structure and add the new items.
                 if "**Skip Data Prep:** YES" in content or "Skip Data Prep: YES" in content:
                     plan["skip_data_prep"] = True
                     print("   📋 Planning detected: Data prep can be skipped (auto-download)")
+                # Check if explicit data prep is required (README has specific data instructions)
+                if "**Skip Data Prep:** NO" in content or "Skip Data Prep: NO" in content:
+                    plan["requires_data_prep"] = True
+                    print("   📋 Planning detected: Explicit data prep required")
             except Exception:
                 pass
 
@@ -545,7 +596,8 @@ Preserve the existing structure and add the new items.
     def _create_basic_checklist(
         self, checklist_path: str, paper_title: str, repo_url: str,
         experiment_mode: str = "all",
-        selected_experiments: List[Dict] = None
+        selected_experiments: List[Dict] = None,
+        skip_data_prep: bool = False
     ) -> None:
         """Create a basic checklist when agent fails.
 
@@ -555,6 +607,7 @@ Preserve the existing structure and add the new items.
             repo_url: Repository URL
             experiment_mode: "single", "all", or "custom"
             selected_experiments: List of selected experiment dicts
+            skip_data_prep: Whether data prep should be skipped (reactive mode)
         """
         # Build experiment list for checklist
         if selected_experiments:
@@ -581,6 +634,27 @@ Preserve the existing structure and add the new items.
             mode_note = "Custom mode - run ONLY the listed experiments"
         else:
             mode_note = "All mode - run ALL experiments"
+
+        # Build data prep section based on skip_data_prep flag
+        if skip_data_prep:
+            data_prep_section = """**Status:** ⏭️ SKIPPED (Reactive Mode)
+**Reason:** Data prep runs only if execution fails with data errors.
+
+- [x] ~~Identify all required datasets~~ (handled by execution)
+- [x] ~~Download datasets~~ (auto-download or already present)
+- [x] ~~Verify data integrity~~ (smoke test validates data)
+
+<!-- Data prep skipped - execution will route back if data issues occur -->"""
+        else:
+            data_prep_section = """**Datasets Required:** [PENDING]
+**Download Method:** [PENDING]
+**Skip Data Prep:** NO
+
+- [ ] Identify all required datasets
+- [ ] Download datasets
+- [ ] Verify data integrity
+
+<!-- EXPAND: data_prep_agent will add download commands here -->"""
 
         content = f"""# Reproduction Checklist
 
@@ -612,14 +686,7 @@ Preserve the existing structure and add the new items.
 ---
 
 ## Data Preparation
-**Datasets Required:** [PENDING]
-**Download Method:** [PENDING]
-
-- [ ] Identify all required datasets
-- [ ] Download datasets
-- [ ] Verify data integrity
-
-<!-- EXPAND: data_prep_agent will add download commands here -->
+{data_prep_section}
 
 ---
 
