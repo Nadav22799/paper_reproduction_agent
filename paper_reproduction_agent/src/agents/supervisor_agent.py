@@ -108,6 +108,19 @@ class SupervisorAgent:
 
         # Execution
         if phase_status.get("execution") != "completed":
+            # STATE AWARENESS: Check if results already exist in checklist
+            # This handles checkpoint resume where execution succeeded but phase wasn't marked complete
+            checklist_path = state.get("checklist_path", "")
+            # Fallback: construct path from implementation_path if checklist_path not set
+            if not checklist_path:
+                import os
+                impl_path = state.get("implementation_path", "")
+                if impl_path:
+                    checklist_path = os.path.join(impl_path, "reproduction_checklist.md")
+                    print(f"   🔍 Constructed checklist path: {checklist_path}")
+            if checklist_path and self._checklist_has_results(checklist_path):
+                print(f"   📋 Results found in checklist - skipping execution")
+                return {"agent": "validation", "directive": "Results already in checklist - verify against paper values"}
             return {"agent": "execution", "directive": "Run experiments using background process pattern"}
 
         # Validation
@@ -152,6 +165,85 @@ class SupervisorAgent:
             print(f"   ⚠️ Context query failed: {e}")
             return ""
 
+    def _checklist_has_results(self, checklist_path: str) -> bool:
+        """Check if reproduction checklist contains experiment results.
+
+        This is used for state-aware routing: if results are already in the
+        checklist, we should route to validation instead of re-running data_prep.
+
+        Args:
+            checklist_path: Path to the reproduction_checklist.md file
+
+        Returns:
+            True if checklist has completed experiments (checked boxes with results)
+        """
+        import os
+        import re
+
+        if not checklist_path:
+            print("   ⚠️ _checklist_has_results: No checklist path provided")
+            return False
+        if not os.path.exists(checklist_path):
+            print(f"   ⚠️ _checklist_has_results: Path does not exist: {checklist_path}")
+            return False
+
+        try:
+            with open(checklist_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            print(f"   🔍 _checklist_has_results: Read {len(content)} chars from {checklist_path}")
+
+            # ROBUST CHECK: Look for completed experiment checkboxes with numeric results
+            # Pattern: "- [x]" followed by text containing a number (any metric)
+            # Examples:
+            #   "- [x] Cora: ... Result: Classification Accuracy=82.7%"
+            #   "- [x] ZINC: ... 0.0636"
+            #   "- [x] Experiment completed: loss=0.123"
+
+            # Find the Experiments section (stop at next level-2 header, NOT level-3)
+            # Use negative lookahead: (?=\n## [^#]) to stop at "## X" but not "### X"
+            experiments_match = re.search(
+                r"##\s*Experiments.*?(?=\n## [^#]|\Z)", content, re.IGNORECASE | re.DOTALL
+            )
+            if not experiments_match:
+                print("   ⚠️ No Experiments section found, using fallback search")
+                # Fallback: search entire file for completed checkboxes with results
+                # This handles checklists without strict section structure
+                completed_with_result = re.search(
+                    r"\[x\].*?Result:.*?(?:\d+\.?\d*%|\d+\.\d+)",
+                    content,
+                    re.IGNORECASE | re.DOTALL,
+                )
+                if completed_with_result:
+                    print(f"   ✅ Fallback found result: {completed_with_result.group(0)[:80]}...")
+                return bool(completed_with_result)
+
+            experiments_section = experiments_match.group(0)
+            print(f"   🔍 Found Experiments section ({len(experiments_section)} chars)")
+
+            # Check for completed experiment checkboxes with RESULT keyword
+            # Pattern: [x] followed by "Result:" and then a metric (percentage or decimal)
+            # This avoids false positives from other checkboxes (smoke tests, env setup)
+            # Examples that MATCH:
+            #   "- [x] Cora: ... Result: Classification Accuracy=82.7%"
+            #   "- [x] ZINC: ... Result: MAE=0.0636"
+            # Examples that DON'T match:
+            #   "- [x] Smoke test passed: 82.7%" (no "Result:" keyword)
+            completed_with_result = re.search(
+                r"\[x\].*?Result:.*?(?:\d+\.?\d*%|\d+\.\d+)",
+                experiments_section,
+                re.IGNORECASE | re.DOTALL,
+            )
+
+            if completed_with_result:
+                print(f"   ✅ Found completed experiment: {completed_with_result.group(0)[:80]}...")
+                return True
+
+            print("   ❌ No completed experiment results found (pattern: '[x]...Result:...number')")
+            return False
+        except Exception as e:
+            print(f"   ⚠️ Could not read checklist: {e}")
+            return False
+
     def _route_failure(self, state: Dict) -> Dict:
         """Route based on error classification for targeted recovery.
 
@@ -170,6 +262,33 @@ class SupervisorAgent:
         retry_count = failure.get("retry_count", 0)
         attempted_fixes = failure.get("attempted_fixes", [])
         max_retries = state.get("max_recovery_attempts", 3)
+
+        # =========================================================
+        # STATE AWARENESS: Check if results already exist in checklist
+        # If execution ran and results exist, go to validation (not data_prep)
+        # This prevents unnecessary loops when results are already captured
+        # =========================================================
+        phase_status = state.get("phase_status", {})
+        checklist_path = state.get("checklist_path", "")
+        # Fallback: construct path from implementation_path if checklist_path not set
+        if not checklist_path:
+            import os
+            impl_path = state.get("implementation_path", "")
+            if impl_path:
+                checklist_path = os.path.join(impl_path, "reproduction_checklist.md")
+
+        # Check if we're in a post-execution error and results exist
+        if (
+            phase_status.get("execution") == "completed"
+            or error_type in ["no_results", "validation"]
+        ):
+            if checklist_path and self._checklist_has_results(checklist_path):
+                print("   📋 Results found in checklist - routing to validation")
+                return {
+                    "agent": "validation",
+                    "directive": "Results found in reproduction checklist. Validate against paper values.",
+                    "context": {"source": "checklist", "skip_file_check": True},
+                }
 
         # Query context for similar past errors
         past_errors = self._get_relevant_context(f"error {error_type} {error_message[:100]}")
@@ -222,6 +341,15 @@ class SupervisorAgent:
         # Route based on error type
         if error_type == "environment":
             return self._route_environment_error(failure, context, attempted_fixes)
+
+        elif error_type == "no_results":
+            # Result files not found on disk - route to validation to extract from logs
+            # This is NOT a data error, the experiment likely succeeded but didn't save files
+            return {
+                "agent": "validation",
+                "directive": "No result files found on disk. Extract results from execution logs or agent output instead.",
+                "context": context,
+            }
 
         elif error_type == "data":
             return {
@@ -465,12 +593,20 @@ Classify the error into EXACTLY one of these categories:
    - Missing scripts (setup.py not found)
    - Logic errors
 
+4. NO_RESULTS
+   - "no result files found" or similar
+   - Results missing after experiment completed successfully
+   - Output files not saved to disk
+   - LLM reported success but no files on disk
+
 GUIDELINES:
 - "No such file: data/..." -> DATA
 - "No such file: requirements.txt" -> CODE
 - "No module named..." -> ENVIRONMENT
+- "no result files found" -> NO_RESULTS
+- "LLM reported success but no" -> NO_RESULTS
 
-Return ONLY the category name (DATA, ENVIRONMENT, or CODE)."""
+Return ONLY the category name (DATA, ENVIRONMENT, CODE, or NO_RESULTS)."""
 
         try:
             from langchain_core.messages import HumanMessage
@@ -489,7 +625,9 @@ Return ONLY the category name (DATA, ENVIRONMENT, or CODE)."""
             classification = content.strip().upper()
             
             # Fallback for unexpected output
-            if "DATA" in classification:
+            if "NO_RESULTS" in classification or "NO RESULTS" in classification:
+                return "no_results"
+            elif "DATA" in classification:
                 return "DATA"
             elif "CODE" in classification:
                 return "CODE"

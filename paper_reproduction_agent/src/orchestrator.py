@@ -224,12 +224,13 @@ class PaperReproductionOrchestrator:
             print("💾 Checkpoint system enabled")
 
         # Initialize embedder using factory (API-based by default for speed)
-        embedder = create_embedder(metrics_tracker=self.metrics_tracker)  # Uses EMBEDDING_PROVIDER env var (default: gemini)
-        
+        # Store as instance variable for checkpoint restore
+        self._embedder = create_embedder(metrics_tracker=self.metrics_tracker)  # Uses EMBEDDING_PROVIDER env var (default: gemini)
+
         # Capture embedding model name if available
-        if embedder and hasattr(embedder, "model"):
-            self.metrics_tracker.set_embedding_model(embedder.model)
-        elif embedder:
+        if self._embedder and hasattr(self._embedder, "model"):
+            self.metrics_tracker.set_embedding_model(self._embedder.model)
+        elif self._embedder:
             self.metrics_tracker.set_embedding_model("Custom/Local")
         else:
             self.metrics_tracker.set_embedding_model("None")
@@ -239,7 +240,7 @@ class PaperReproductionOrchestrator:
             model_name="gpt-4",
             hot_capacity=50,
             max_tokens=100000,  # Larger budget for orchestrator
-            embedder=embedder,  # Use factory-created embedder (API or local)
+            embedder=self._embedder,  # Use factory-created embedder (API or local)
         )
         print("🧠 Hierarchical context manager initialized")
 
@@ -292,7 +293,7 @@ class PaperReproductionOrchestrator:
         )
         self.planning_agent = PlanningAgent(
             self.reasoning_llm,  # Use Thinking Mode for detailed planning
-            max_iterations=30,
+            max_iterations=90,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
@@ -304,21 +305,21 @@ class PaperReproductionOrchestrator:
         )
         self.data_prep_agent = DataPrepAgent(
             self.reasoning_llm,
-            max_iterations=50,
+            max_iterations=150,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.execution_agent = ExecutionAgent(
             self.reasoning_llm,
-            max_iterations=50,
+            max_iterations=150,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
         )
         self.validation_agent = ValidationAgent(
             self.reasoning_llm,
-            max_iterations=30,
+            max_iterations=90,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
@@ -2606,6 +2607,12 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                     self.hierarchical_context = HierarchicalContextManager.from_dict(
                         hierarchical_state
                     )
+                    # Re-attach API embedder (not serialized in checkpoint)
+                    # Without this, from_dict() falls back to downloading local SentenceTransformer
+                    if self._embedder:
+                        self.hierarchical_context._embedder = self._embedder
+                        self.hierarchical_context._embedder_provided = True
+                        print("   🔌 Re-attached API embedder to restored context")
                     stats = self.hierarchical_context.get_stats()
                     print(f"   🧠 Restored hierarchical context: "
                           f"hot={stats['hot_entries']}, cold={stats['cold_summaries']}")

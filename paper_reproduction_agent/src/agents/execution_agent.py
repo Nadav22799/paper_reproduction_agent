@@ -305,7 +305,7 @@ Start by reading the checklist to confirm tool, environment, and experiment list
         print("-" * 60)
 
         try:
-            config = {"recursion_limit": self.max_iterations * 3}
+            config = {"recursion_limit": self.max_iterations}
             if self.callbacks:
                 config["callbacks"] = self.callbacks
             result = agent.invoke(

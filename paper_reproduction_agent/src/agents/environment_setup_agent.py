@@ -184,7 +184,7 @@ class EnvironmentSetupAgent:
                     ]
                 },
                 config={
-                    "recursion_limit": self.max_iterations * 3,
+                    "recursion_limit": self.max_iterations,
                     "callbacks": invoke_callbacks,
                 },
             )
@@ -316,89 +316,103 @@ class EnvironmentSetupAgent:
         )
         full_conversation_lower = full_conversation.lower()
 
-        # Check for incomplete execution (agent hit iteration limit)
-        incomplete_indicators = [
-            "sorry",
-            "need more steps",
-            "cannot complete",
-            "unable to finish",
-            "i apologize",
-            "unfortunately",
-            "more iterations",
-        ]
-        is_incomplete = any(ind in full_conversation_lower for ind in incomplete_indicators)
+        # =====================================================================
+        # USE STRUCTURED LLM OUTPUT FOR ROBUST SUCCESS DETECTION
+        # This replaces brittle keyword matching with LLM judgment
+        # Pattern from execution_agent.py:487-514
+        # =====================================================================
+        try:
+            # Import pydantic with fallback for different versions
+            try:
+                from langchain_core.pydantic_v1 import BaseModel, Field
+            except ImportError:
+                try:
+                    from pydantic.v1 import BaseModel, Field
+                except ImportError:
+                    from pydantic import BaseModel, Field
 
-        # Check for SMOKE TEST success (Critical - env is only ready if smoke test passed!)
-        smoke_test_markers = [
-            "smoke test passed",
-            "smoke test successful",
-            "script ran successfully",
-            "experiment started successfully",
-            "training started",
-            "started training",
-            "epoch 0",
-            "epoch 1",
-            "step 0",
-            "step 1",
-            "training loop",
-        ]
-        smoke_test_passed = any(marker in full_conversation_lower for marker in smoke_test_markers)
+            from typing import Optional as Opt
 
-        # Check for basic success indicators (environment created, imports work)
-        basic_success_markers = [
-            "environment created successfully",
-            "environment setup complete",
-            "successfully prepared",
-            "imports ok",
-            "verification successful",
-            "✅ imports ok",
-        ]
-        has_basic_success = any(marker in full_conversation_lower for marker in basic_success_markers)
+            class EnvSetupAnalysis(BaseModel):
+                smoke_test_passed: bool = Field(
+                    description="True if the smoke test ran successfully (script started, printed output, no crash)"
+                )
+                env_name: Opt[str] = Field(
+                    default=None,
+                    description="The environment name that was created (e.g., 'gat_env_a1b2')"
+                )
+                env_type: Opt[str] = Field(
+                    default=None,
+                    description="Environment type: 'micromamba', 'conda', 'pip', 'venv', etc."
+                )
+                failure_reason: Opt[str] = Field(
+                    default=None,
+                    description="If smoke test failed, explain why. None if successful."
+                )
 
-        # Check for explicit failure indicators
-        has_explicit_failure = (
-            "modulenotfounderror" in full_conversation_lower
-            or "importerror" in full_conversation_lower
-            or "environment creation failed" in full_conversation_lower
-            or "setup failed" in full_conversation_lower
-            or "no such file" in full_conversation_lower
-            or "filenotfounderror" in full_conversation_lower
-        )
+            # Use LLM to analyze the conversation
+            analyzer = self.llm.with_structured_output(EnvSetupAnalysis)
+            analysis_prompt = f"""Analyze this environment setup conversation.
 
-        # Determine success status based on all conditions
-        # Determine success status based on all conditions
-        if smoke_test_passed:
-            # Full success: smoke test passed implies environment is working
-            result["success"] = True
-            result["status"] = "success"
-        elif is_incomplete:
-            result["success"] = False
-            result["status"] = "incomplete"
-            result["error"] = "Agent hit iteration limit without completing environment setup"
-        elif has_explicit_failure:
-            result["status"] = "failed"
-            # Try to extract error message
-            for msg in reversed(messages):
-                content = str(msg.content) if hasattr(msg, "content") else str(msg)
-                if "error" in content.lower():
-                    result["error"] = content[:500]
-                    break
-        elif has_basic_success:
-            # Partial success: basic setup done but no smoke test confirmation
-            result["success"] = False
-            result["status"] = "partial"
-            result["error"] = "Basic environment setup done but smoke test not completed. Environment may not work for actual experiments."
-        elif (
-            "failed" in full_conversation_lower
-            or "error" in full_conversation_lower
-        ):
-            result["status"] = "failed"
-            # Try to extract error message
-            for msg in reversed(messages):
-                content = str(msg.content) if hasattr(msg, "content") else str(msg)
-                if "error" in content.lower():
-                    result["error"] = content[:500]
-                    break
+CONVERSATION (last 8000 chars):
+{full_conversation[-8000:]}
+
+Did the smoke test pass? A smoke test passes if:
+- The script ran and printed output (hyperparameters, dataset info, training started)
+- No Python exceptions (Traceback) crashed the script
+- IGNORE warnings (DeprecationWarning, FutureWarning, distutils, etc.)
+- IGNORE the word "error" if it's just in a variable name or log format string
+
+Extract the environment name from commands like "micromamba create -n NAME" or "micromamba run -n NAME".
+Determine the environment type (micromamba, conda, pip, venv) based on the commands used.
+"""
+
+            analysis = analyzer.invoke(analysis_prompt)
+            print(f"DEBUG: LLM EnvSetup Analysis: {analysis}")
+
+            # Apply LLM's judgment
+            if analysis.smoke_test_passed:
+                result["success"] = True
+                result["status"] = "success"
+            else:
+                result["success"] = False
+                result["status"] = "failed"
+                if analysis.failure_reason:
+                    result["error"] = analysis.failure_reason
+
+            # Use LLM-extracted env info if available (will be overridden by regex if found)
+            if analysis.env_name:
+                result["env_name"] = analysis.env_name
+            if analysis.env_type:
+                result["env_type"] = analysis.env_type
+
+        except Exception as e:
+            print(f"⚠️ Structured LLM analysis failed: {e}. Falling back to keyword matching.")
+            # FALLBACK: Original keyword-based logic
+            incomplete_indicators = [
+                "sorry", "need more steps", "cannot complete", "unable to finish",
+                "i apologize", "unfortunately", "more iterations",
+            ]
+            is_incomplete = any(ind in full_conversation_lower for ind in incomplete_indicators)
+
+            smoke_test_markers = [
+                "smoke test passed", "smoke test successful", "script ran successfully",
+                "experiment started successfully", "training started", "started training",
+                "epoch 0", "epoch 1", "step 0", "step 1", "training loop",
+            ]
+            smoke_test_passed = any(marker in full_conversation_lower for marker in smoke_test_markers)
+
+            if smoke_test_passed:
+                result["success"] = True
+                result["status"] = "success"
+            elif is_incomplete:
+                result["success"] = False
+                result["status"] = "incomplete"
+                result["error"] = "Agent hit iteration limit without completing environment setup"
+            elif "modulenotfounderror" in full_conversation_lower or "importerror" in full_conversation_lower:
+                result["status"] = "failed"
+            elif "failed" in full_conversation_lower:
+                result["status"] = "failed"
 
         # Try to extract environment name
         import re

@@ -231,7 +231,7 @@ Start by analyzing the provided context."""
             }
 
     def _analyze_result(self, result: Dict, code_path: str) -> tuple:
-        """Analyze agent result to determine success using strict protocol.
+        """Analyze agent result to determine success using structured LLM output.
 
         Args:
             result: Agent execution result
@@ -241,7 +241,8 @@ Start by analyzing the provided context."""
             Tuple of (success: bool, details: dict, last_message: str)
         """
         import re
-        
+        from typing import List
+
         # Extract info from agent messages
         messages = result.get("messages", [])
         last_message = ""
@@ -260,27 +261,84 @@ Start by analyzing the provided context."""
                 else:
                     last_message = str(last_msg.content)
 
-        # Clean, strict parsing based on requested output format
-        # Pattern: DATA PREP STATUS: [SUCCESS/FAILED]
-        status_match = re.search(r"DATA PREP STATUS:\s*(SUCCESS|FAILED)", last_message, re.IGNORECASE)
-        path_match = re.search(r"data_path:\s*(.+)", last_message, re.IGNORECASE)
-        
+        # =====================================================================
+        # USE STRUCTURED LLM OUTPUT FOR ROBUST SUCCESS DETECTION
+        # This replaces brittle keyword matching with LLM judgment
+        # Pattern from execution_agent.py:487-514
+        # =====================================================================
         success = False
         data_locations = []
-        
-        if status_match:
-            status = status_match.group(1).upper()
-            if status == "SUCCESS":
-                success = True
-        
-        if path_match:
-            path = path_match.group(1).strip()
-            if path and path.lower() != "n/a":
-                data_locations.append(path)
+
+        try:
+            # Import pydantic with fallback for different versions
+            try:
+                from langchain_core.pydantic_v1 import BaseModel, Field
+            except ImportError:
+                try:
+                    from pydantic.v1 import BaseModel, Field
+                except ImportError:
+                    from pydantic import BaseModel, Field
+
+            from typing import Optional as Opt
+
+            class DataPrepAnalysis(BaseModel):
+                datasets_ready: bool = Field(
+                    description="True if datasets were successfully prepared, verified, or confirmed to already exist"
+                )
+                data_locations: List[str] = Field(
+                    default_factory=list,
+                    description="List of paths where data was found or prepared"
+                )
+                failure_reason: Opt[str] = Field(
+                    default=None,
+                    description="If data prep failed, explain why. None if successful."
+                )
+
+            # Use LLM to analyze the agent's output
+            analyzer = self.llm.with_structured_output(DataPrepAnalysis)
+            analysis_prompt = f"""Analyze this data preparation result.
+
+AGENT OUTPUT:
+{last_message[:4000]}
+
+Did data preparation succeed? It succeeds if:
+- Datasets were downloaded successfully
+- Datasets already existed and were verified
+- Agent confirmed data is ready (e.g., "prepared the datasets", "data verified", "datasets loaded")
+- No missing data errors that block execution
+
+Extract any data paths mentioned (e.g., "./data/cora", "/path/to/datasets").
+"""
+
+            analysis = analyzer.invoke(analysis_prompt)
+            print(f"DEBUG: LLM DataPrep Analysis: {analysis}")
+
+            success = analysis.datasets_ready
+            data_locations = analysis.data_locations or []
+
+            if not success and analysis.failure_reason:
+                print(f"⚠️ Data prep failed: {analysis.failure_reason}")
+
+        except Exception as e:
+            print(f"⚠️ Structured LLM analysis failed: {e}. Falling back to keyword matching.")
+            # FALLBACK: keyword-based logic
+            success_indicators = [
+                "datasets ready", "successfully loaded", "prepared the datasets",
+                "data verified", "datasets exist", "data is ready", "verification passed",
+                "data preparation complete", "datasets downloaded",
+            ]
+            success = any(ind in last_message.lower() for ind in success_indicators)
+
+            # Try to extract paths from the message
+            path_match = re.search(r"data_path:\s*(.+)", last_message, re.IGNORECASE)
+            if path_match:
+                path = path_match.group(1).strip()
+                if path and path.lower() != "n/a":
+                    data_locations.append(path)
 
         details = {
             "data_locations": data_locations,
-            "found_existing": success, # simplified logic: success implies data exists now
+            "found_existing": success,
             "agent_output": last_message[:500] if last_message else "",
         }
 
