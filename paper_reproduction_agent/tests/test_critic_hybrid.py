@@ -1,9 +1,13 @@
-
+import sys
+import os
 import unittest
 from unittest.mock import MagicMock, patch
-import os
 import shutil
 import json
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from src.agents.critic_agent import CriticAgent
 
 class TestCriticAgent(unittest.TestCase):

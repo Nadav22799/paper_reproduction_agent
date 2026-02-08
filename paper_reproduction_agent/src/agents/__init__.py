@@ -1,18 +1,5 @@
 """Specialized agents for paper reproduction."""
 
-from .unified_paper_analyzer import UnifiedPaperAnalyzer
-from .environment_setup_agent import EnvironmentSetupAgent
-from .unified_reproduction_agent import UnifiedReproductionAgent
-from .discovery_agent import DiscoveryAgent
-
-# Supervisor architecture agents
-from .supervisor_agent import SupervisorAgent
-from .planning_agent import PlanningAgent
-from .critic_agent import CriticAgent
-from .data_prep_agent import DataPrepAgent
-from .execution_agent import ExecutionAgent
-from .validation_agent import ValidationAgent
-
 __all__ = [
     # Legacy agents
     "UnifiedPaperAnalyzer",
@@ -27,3 +14,25 @@ __all__ = [
     "ExecutionAgent",
     "ValidationAgent",
 ]
+
+_AGENT_MODULES = {
+    "UnifiedPaperAnalyzer": ".unified_paper_analyzer",
+    "EnvironmentSetupAgent": ".environment_setup_agent",
+    "UnifiedReproductionAgent": ".unified_reproduction_agent",
+    "DiscoveryAgent": ".discovery_agent",
+    "SupervisorAgent": ".supervisor_agent",
+    "PlanningAgent": ".planning_agent",
+    "CriticAgent": ".critic_agent",
+    "DataPrepAgent": ".data_prep_agent",
+    "ExecutionAgent": ".execution_agent",
+    "ValidationAgent": ".validation_agent",
+}
+
+
+def __getattr__(name):
+    """Lazy import to avoid pulling in heavy dependencies at package load time."""
+    if name in _AGENT_MODULES:
+        import importlib
+        module = importlib.import_module(_AGENT_MODULES[name], __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
