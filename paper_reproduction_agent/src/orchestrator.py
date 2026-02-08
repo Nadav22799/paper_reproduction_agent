@@ -174,9 +174,6 @@ class PaperReproductionOrchestrator:
         self.reasoning_llm = create_llm(temperature=0.3, include_thoughts=True)
         self.config = ReproductionConfig()
 
-        # Caching support (initialized after paper analysis)
-        self.cache_name: Optional[str] = None
-
         # Determine which architecture to use
         if use_supervisor is None:
             use_supervisor = os.getenv("USE_SUPERVISOR_ARCHITECTURE", "false").lower() == "true"
@@ -201,7 +198,6 @@ class PaperReproductionOrchestrator:
         self.enable_logging = enable_logging
         self.file_logger = None
         self.logging_callback = None
-        self.file_logger = None
         
         if enable_logging:
             self.file_logger = FileLogger(log_dir=self.config.logs_path)
@@ -250,7 +246,7 @@ class PaperReproductionOrchestrator:
         # Initialize legacy agents (always needed for backward compatibility)
         self.env_setup_agent = EnvironmentSetupAgent(
             self.reasoning_llm,
-            max_iterations=50,
+            max_iterations=150,
             metrics_tracker=self.metrics_tracker,
             callbacks=[self.logging_callback] if self.logging_callback else [],
             hierarchical_context=self.hierarchical_context,
@@ -1031,9 +1027,9 @@ class PaperReproductionOrchestrator:
                     state["paper_title"] = paper.title
                 else:
                     # Fallback: extract title from PDF text (first non-empty line, likely title)
-                    lines = [l.strip() for l in full_text.split('\n') if l.strip()]
+                    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
                     inferred_title = lines[0] if lines else f"Paper {arxiv_id}"
-                    print(f"⚠️  Using cached PDF without arXiv metadata")
+                    print("⚠️  Using cached PDF without arXiv metadata")
                     print(f"   Inferred title: {inferred_title[:80]}...")
                     state["paper_metadata"] = {
                         "title": inferred_title,
@@ -1088,15 +1084,6 @@ class PaperReproductionOrchestrator:
 
             # Print analysis summary
             self._print_analysis_summary(state, analysis)
-
-            # Enable prompt caching with paper content for cost savings
-            paper_context = state.get("agent_contexts", {}).get("paper_analyzer", "")
-            paper_results_str = str(state.get("paper_results", {}))
-            if paper_context:
-                self._enable_caching(
-                    paper_content=paper_context,
-                    paper_results=paper_results_str,
-                )
 
             # Fallback discovery is now handled by DiscoveryAgent in the next node
             if not state["code_references"]:
@@ -1191,66 +1178,6 @@ class PaperReproductionOrchestrator:
 
         except Exception as e:
             print(f"   ⚠️  Warning: Failed to store paper context: {e}")
-
-    def _enable_caching(self, paper_content: str, readme_content: str = "", paper_results: str = ""):
-        """Enable prompt caching after paper analysis.
-
-        For Gemini: Creates an explicit cache via google-genai and refreshes LLMs.
-        For Claude: Caching is automatic via the beta header (already enabled in llm_factory).
-        """
-        from .utils.llm_factory import create_gemini_cache, create_llm, get_provider
-
-        try:
-            provider = get_provider()
-
-            if provider == "gemini":
-                # Create Gemini cache
-                self.cache_name = create_gemini_cache(
-                    paper_content=paper_content,
-                    readme_content=readme_content,
-                    paper_results=paper_results,
-                    paper_id=getattr(self, "paper_title", "unknown")[:50],
-                )
-
-                if self.cache_name:
-                    # Refresh LLMs with caching
-                    self.llm = create_llm(temperature=0.1, cached_content=self.cache_name)
-                    self.reasoning_llm = create_llm(
-                        temperature=0.3,
-                        include_thoughts=True,
-                        cached_content=self.cache_name,
-                    )
-                    self._refresh_agent_llms()
-                    print("Gemini caching enabled for subsequent agent calls")
-
-            elif provider == "claude":
-                # Claude caching is automatic via cache_control in messages
-                # No explicit cache creation needed - just use cache_control markers
-                print("Claude caching enabled (automatic via headers)")
-
-        except Exception as e:
-            print(f"Warning: Failed to enable caching: {e}")
-
-    def _refresh_agent_llms(self):
-        """Refresh agent LLMs after caching is enabled."""
-        # Update legacy agents
-        if hasattr(self, "env_setup_agent"):
-            self.env_setup_agent.llm = self.reasoning_llm
-        if hasattr(self, "unified_reproducer"):
-            self.unified_reproducer.llm = self.llm
-
-        # Update supervisor architecture agents if enabled
-        if self.use_supervisor:
-            if hasattr(self, "supervisor_agent"):
-                self.supervisor_agent.llm = self.reasoning_llm
-            if hasattr(self, "planning_agent"):
-                self.planning_agent.llm = self.reasoning_llm
-            if hasattr(self, "data_prep_agent"):
-                self.data_prep_agent.llm = self.llm
-            if hasattr(self, "execution_agent"):
-                self.execution_agent.llm = self.llm
-            if hasattr(self, "validation_agent"):
-                self.validation_agent.llm = self.llm
 
     def _print_analysis_summary(self, state, analysis):
         """Print detailed analysis results."""
@@ -1350,7 +1277,7 @@ class PaperReproductionOrchestrator:
                     git_dir = os.path.join(code_path, ".git")
                     if os.path.isdir(git_dir):
                         print(f"✅ Found existing repository: {existing_url}")
-                        print(f"   Skipping discovery and using existing repo.")
+                        print("   Skipping discovery and using existing repo.")
                         state["selected_repo"] = {
                             "url": existing_url,
                             "source": "existing_local",
@@ -2088,7 +2015,7 @@ class PaperReproductionOrchestrator:
             completed.remove(phase)
             state["completed_phases"] = completed
             print(f"⚠️  Invalidated checkpoint for '{phase}': {reason}")
-            print(f"   Phase will be re-run instead of skipped.")
+            print("   Phase will be re-run instead of skipped.")
 
     def _validate_execution_checkpoint(self, state: PaperReproductionState) -> bool:
         """Validate that execution checkpoint has actual results.
@@ -2189,28 +2116,20 @@ class PaperReproductionOrchestrator:
         # Check if data directories have content
         code_path = state.get("implementation_path", "./cloned_repo")
         data_patterns = ["data", "datasets", "dataset"]
-        has_data = False
 
         for pattern in data_patterns:
             data_path = os.path.join(code_path, pattern)
             if os.path.exists(data_path) and os.path.isdir(data_path):
                 try:
                     if any(os.listdir(data_path)):
-                        has_data = True
                         break
                 except (OSError, PermissionError):
                     pass
 
-        # If no data directory found, check dataset_results for indicators
-        dataset_results = state.get("dataset_results", {})
-        if dataset_results.get("datasets_downloaded") or dataset_results.get("data_ready"):
-            has_data = True
-
         # If data_prep was marked complete but there's no obvious data,
-        # we might have skipped it intentionally (no datasets needed)
-        # So only invalidate if we can confirm missing required data
-
-        return True  # Default to trusting the checkpoint for data_prep
+        # we might have skipped it intentionally (no datasets needed).
+        # Default to trusting the checkpoint for data_prep.
+        return True
 
     def _save_checkpoint(self, state: PaperReproductionState, phase: str, success: bool = True):
         """Save checkpoint for current phase.
@@ -2273,8 +2192,6 @@ class PaperReproductionOrchestrator:
             ),
             # Metrics tracker state for cost/duration preservation across resumes
             "metrics_tracker_state": self.metrics_tracker.to_dict(),
-            # Gemini cache name (may be expired but worth attempting on resume)
-            "cache_name": getattr(self, "cache_name", None),
         }
 
         self.checkpoint_manager.save(
@@ -2643,12 +2560,6 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                 except Exception as e:
                     print(f"   ⚠️ Failed to restore metrics: {e}")
                     # Continue with fresh tracker - non-fatal
-
-            # Restore Gemini cache name if available
-            restored_cache = state.pop("cache_name", None)
-            if restored_cache:
-                self.cache_name = restored_cache
-                print(f"   🗄️ Restored cache name: {restored_cache[:50]}...")
 
             completed_phases = state.get("completed_phases", [])
 

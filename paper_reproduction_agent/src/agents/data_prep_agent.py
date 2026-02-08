@@ -9,7 +9,7 @@ This agent:
 """
 
 import os
-from typing import Dict, Optional
+from typing import Dict
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from ..tools.code_execution_tools import (
@@ -21,7 +21,6 @@ from ..tools.code_execution_tools import (
 )
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
-from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class DataPrepAgent:

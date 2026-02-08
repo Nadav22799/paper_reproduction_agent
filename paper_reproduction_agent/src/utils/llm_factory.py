@@ -1,12 +1,11 @@
-"""LLM Factory - Gemini and Claude with prompt caching support.
+"""LLM Factory - Gemini and Claude support.
 
 Simplified version supporting only two providers:
-- Gemini (primary) with explicit cache creation via google-genai
+- Gemini (primary) with implicit caching (automatic on Gemini 3/2.5)
 - Claude (alternative) with automatic prompt caching via beta header
 """
 
 import os
-from typing import Optional
 
 
 def get_provider() -> str:
@@ -39,7 +38,6 @@ def get_provider() -> str:
 def create_llm(
     temperature: float = 0.3,
     include_thoughts: bool = True,
-    cached_content: str = None,
 ):
     """
     Create LLM instance based on configured provider.
@@ -47,7 +45,6 @@ def create_llm(
     Args:
         temperature: Generation temperature (default from env or 0.3)
         include_thoughts: Enable chain-of-thought (Gemini only)
-        cached_content: Cache name/reference for prompt caching (Gemini only)
 
     Returns:
         Configured LLM instance
@@ -58,38 +55,31 @@ def create_llm(
     provider = get_provider()
 
     if provider == "gemini":
-        return _create_gemini_llm(temperature, include_thoughts, cached_content)
+        return _create_gemini_llm(temperature, include_thoughts)
     else:
-        return _create_claude_llm(temperature, cached_content)
+        return _create_claude_llm(temperature)
 
 
 def _create_gemini_llm(
     temperature: float,
     include_thoughts: bool,
-    cached_content: str = None,
 ):
-    """Create Gemini LLM with optional caching."""
+    """Create Gemini LLM (implicit caching is automatic on Gemini 3/2.5)."""
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
 
-    kwargs = {
-        "model": model,
-        "google_api_key": api_key,
-        "temperature": temperature,
-        "include_thoughts": include_thoughts,
-    }
-
-    if cached_content:
-        kwargs["cached_content"] = cached_content
-        print(f"   Using Gemini cache: {cached_content[:60]}...")
-
     print(f"Using Gemini: {model}")
-    return ChatGoogleGenerativeAI(**kwargs)
+    return ChatGoogleGenerativeAI(
+        model=model,
+        google_api_key=api_key,
+        temperature=temperature,
+        include_thoughts=include_thoughts,
+    )
 
 
-def _create_claude_llm(temperature: float, cached_content: str = None):
+def _create_claude_llm(temperature: float):
     """Create Claude LLM with prompt caching enabled via beta header."""
     from langchain_anthropic import ChatAnthropic
 
@@ -107,69 +97,6 @@ def _create_claude_llm(temperature: float, cached_content: str = None):
         extra_headers=extra_headers,
     )
 
-
-# === GEMINI CACHE CREATION ===
-
-
-def create_gemini_cache(
-    paper_content: str,
-    readme_content: str = "",
-    paper_results: str = "",
-    paper_id: str = "paper",
-    ttl: str = "3600s",
-) -> Optional[str]:
-    """
-    Create a Gemini cache for repeated context.
-
-    Args:
-        paper_content: Main paper text content
-        readme_content: Repository README content
-        paper_results: Expected results from paper
-        paper_id: Identifier for the paper (used in cache display name)
-        ttl: Time-to-live for the cache (default: 1 hour)
-
-    Returns:
-        Cache name string to pass to create_llm(), or None on failure
-    """
-    try:
-        from google import genai
-        from google.genai import types
-
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return None
-
-        client = genai.Client(api_key=api_key)
-        model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
-
-        system_content = f"""=== PAPER CONTENT ===
-{paper_content}
-
-=== README ===
-{readme_content}
-
-=== EXPECTED RESULTS ===
-{paper_results}
-"""
-
-        cache = client.caches.create(
-            model=model,
-            config=types.CreateCachedContentConfig(
-                display_name=f"paper_{paper_id[:50]}",
-                system_instruction=system_content,
-                ttl=ttl,
-            ),
-        )
-
-        print(f"Gemini cache created: {cache.name}")
-        return cache.name
-
-    except ImportError:
-        print("google-genai not installed. Run: pip install google-genai")
-        return None
-    except Exception as e:
-        print(f"Gemini cache creation failed: {e}")
-        return None
 
 
 # === EMBEDDINGS ===

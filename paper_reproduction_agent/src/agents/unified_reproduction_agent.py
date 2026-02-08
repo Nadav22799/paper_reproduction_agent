@@ -28,7 +28,6 @@ from ..tools.code_execution_tools import (
     stop_process,  # NEW: Cleanup
 )
 from ..utils.llm_factory import create_llm
-from ..utils.logging_callback import LoggingCallbackHandler
 from ..utils.message_utils import normalize_message_content
 from ..utils.resource_detector import (
     detect_system_resources,

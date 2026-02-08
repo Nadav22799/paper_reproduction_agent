@@ -71,7 +71,6 @@ class OOMHandler:
             r"cudaMalloc failed",
         ]
 
-        output.lower()
         return any(
             re.search(pattern, output, re.IGNORECASE) for pattern in oom_patterns
         )

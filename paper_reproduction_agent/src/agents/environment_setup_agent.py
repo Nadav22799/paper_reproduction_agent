@@ -50,7 +50,7 @@ class EnvironmentSetupAgent:
         self.system_prompt = ENVIRONMENT_AGENT_PROMPT
 
         # Tools for environment setup
-        tools = [
+        self.tools = [
             # Core file operations
             read_file,
             list_directory,
@@ -65,7 +65,7 @@ class EnvironmentSetupAgent:
         ]
 
         # Create ReAct agent
-        self.agent = create_react_agent(self.llm, tools=tools)
+        self.agent = create_react_agent(self.llm, tools=self.tools)
 
         print("\n" + "=" * 60)
         print("🔧 Environment Setup Agent Initialized")

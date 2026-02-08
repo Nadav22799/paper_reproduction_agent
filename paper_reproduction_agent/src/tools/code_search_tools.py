@@ -434,7 +434,7 @@ def search_github_for_arxiv_reference(
                     total_count = code_results.totalCount
                     if total_count == 0:
                         continue  # No results for this pattern, try next
-                except:
+                except Exception:
                     pass  # If we can't check count, try iterating anyway
 
                 for code in code_results[: max_results * 2]:  # Get more to filter

@@ -7,8 +7,8 @@ This document tracks the performance of the **Paper Reproduction Agent** across 
 | Metric | Value |
 | :--- | :--- |
 | **Total Papers Attempted** | 3 |
-| **Full Reproductions** | 2 (67%) |
-| **Partial Reproductions** | 1 (33%) |
+| **Full Reproductions** | 2 |
+| **Partial Reproductions** | 1 (interrupted by resource limits, not agent failure) |
 | **Average Setup Time** | ~12m |
 | **Hardware Range** | CPU-only → 4x L40S |
 
@@ -46,7 +46,7 @@ This document tracks the performance of the **Paper Reproduction Agent** across 
 
 #### 🤖 Autonomous Engineering Analysis
 
-The agent demonstrated **production-grade ML engineering** by successfully bridging a **10-year technology gap** — running 2016 TensorFlow code on 2026 infrastructure with zero human intervention.
+The agent demonstrated **autonomous ML engineering** by successfully bridging a **10-year technology gap** — running 2016 TensorFlow code on 2026 infrastructure.
 
 **Key Achievements:**
 
@@ -98,7 +98,7 @@ The agent demonstrated **hardware-agnostic execution** by successfully running a
 
 *   **Modern PyTorch**: Unlike GCN (TensorFlow 1.x), GAT uses PyTorch which has better forward compatibility. Environment setup was straightforward.
 
-*   **Zero Human Intervention**: From paper URL to verified results with no manual steps.
+*   **Fully Autonomous**: From paper URL to verified results with no manual steps.
 
 #### ⚠️ Limitations Observed
 
@@ -124,8 +124,8 @@ The agent demonstrated **hardware-agnostic execution** by successfully running a
 
 | Metric | Value |
 |--------|-------|
-| Test Score (MAE) | 0.0636 ± 0.0004 |
-| Runs | 5 |
+| Test Score (MAE) | 0.0636 ± 0.0004 (5 seeds, single run) |
+| Runs | 5 seeds |
 | Epochs | 500 |
 | Hardware | 4x NVIDIA L40S, 502GB RAM, 128 CPU cores |
 

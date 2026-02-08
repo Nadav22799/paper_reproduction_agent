@@ -27,7 +27,6 @@ from ..tools.code_execution_tools import (
 from ..utils.llm_factory import create_llm
 from ..utils.resource_detector import detect_system_resources, get_experiment_strategy
 from ..utils.hierarchical_context import HierarchicalContextManager
-from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class ExecutionAgent:
@@ -101,7 +100,6 @@ class ExecutionAgent:
         reproduction_plan = state.get("reproduction_plan", {})
 
         # Get selected datasets from plan (set by planning agent from paper analysis)
-        selected_experiments = reproduction_plan.get("selected_experiments", [])
         selected_datasets = reproduction_plan.get("selected_datasets", [])
 
         print("🚀 Execution Agent: Running experiments...")
@@ -189,13 +187,13 @@ ENVIRONMENT INFO (from checklist):
 - Command pattern: `./venv/bin/python <script.py>` or `source venv/bin/activate && python <script.py>`
 """
             elif tool_detected == "poetry":
-                tool_info = f"""
+                tool_info = """
 ENVIRONMENT INFO (from checklist):
 - Tool: poetry
 - Command pattern: `poetry run python <script.py>`
 """
             elif tool_detected == "uv":
-                tool_info = f"""
+                tool_info = """
 ENVIRONMENT INFO (from checklist):
 - Tool: uv
 - Command pattern: `uv run python <script.py>`

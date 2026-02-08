@@ -13,7 +13,6 @@ import json
 from datetime import datetime
 from typing import Dict, List, Tuple
 from langchain_google_genai import ChatGoogleGenerativeAI
-from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class CriticAgent:

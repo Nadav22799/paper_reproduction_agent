@@ -7,7 +7,7 @@ sub-agent should handle the current task based on:
 3. Planning update requests from sub-agents
 """
 
-from typing import Dict, Optional
+from typing import Dict
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
 
@@ -119,7 +119,7 @@ class SupervisorAgent:
                     checklist_path = os.path.join(impl_path, "reproduction_checklist.md")
                     print(f"   🔍 Constructed checklist path: {checklist_path}")
             if checklist_path and self._checklist_has_results(checklist_path):
-                print(f"   📋 Results found in checklist - skipping execution")
+                print("   📋 Results found in checklist - skipping execution")
                 return {"agent": "validation", "directive": "Results already in checklist - verify against paper values"}
             return {"agent": "execution", "directive": "Run experiments using background process pattern"}
 
@@ -293,7 +293,7 @@ class SupervisorAgent:
         # Query context for similar past errors
         past_errors = self._get_relevant_context(f"error {error_type} {error_message[:100]}")
         if past_errors:
-            print(f"   🧠 Found relevant past context for error recovery")
+            print("   🧠 Found relevant past context for error recovery")
 
         # Store this error in context for future reference
         if self.hierarchical_context:

@@ -607,4 +607,4 @@ class MetricsTracker:
         if self.enable_live_display and self._display_thread is None:
             self._start_live_display()
 
-        print(f"   Resumed metrics from original start time")
+        print("   Resumed metrics from original start time")

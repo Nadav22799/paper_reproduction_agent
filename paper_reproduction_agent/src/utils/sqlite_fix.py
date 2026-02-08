@@ -14,7 +14,6 @@ def apply_sqlite_fix():
     try:
         # Check if we're on Windows (primary target for this issue)
         # or if explicitly needed
-        import platform
         
         # Only apply if standard sqlite3 is too old
         import sqlite3

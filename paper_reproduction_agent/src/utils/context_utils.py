@@ -6,7 +6,7 @@ This module provides helpers for:
 3. Building structured context entries for hierarchical context storage
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 
 def extract_key_facts(agent_name: str, result: Dict[str, Any]) -> str:
@@ -52,7 +52,7 @@ def extract_key_facts(agent_name: str, result: Dict[str, Any]) -> str:
             facts.append("- Datasets: NOT READY")
         locations = result.get("dataset_results", {}).get("data_locations", [])
         if locations:
-            facts.append(f"- Data Locations: {', '.join(str(l) for l in locations[:3])}")
+            facts.append(f"- Data Locations: {', '.join(str(loc) for loc in locations[:3])}")
 
     elif agent_name == "planning":
         if result.get("plan_created"):

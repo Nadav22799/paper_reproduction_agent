@@ -2,25 +2,25 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Build Status](https://github.com/Nadav22799/paper_reproduction_agent/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Nadav22799/paper_reproduction_agent/actions/workflows/ci.yml/badge.svg)
 
-**An Autonomous AI Agent that reads research papers, clones their code, and scientifically verifies their results.**
+**An autonomous multi-agent system that reads research papers, clones their code, sets up environments, and scientifically verifies their results.**
 
 > [!NOTE]
-> This is not a "Chat with PDF" tool. It is a **State Machine** that manages environments, debugs code, and detects hardware to reproduce verifiable scientific baselines.
+> This is a stateful multi-agent system — not a document summarizer. It manages real environments, resolves dependencies, handles hardware detection, and verifies experimental results against paper-reported metrics.
 
 ---
 
-## 🚀 Key Features (Why this matters)
+## 🚀 Key Features
 
-*   **🧠 Unified Agent Architecture**: Orchestrates specialized agents (Analyzer, Setup, Reproducer) using a LangGraph state machine.
-*   **🛡️ Self-Healing Environment**: Automatically detects broken dependencies (e.g., `numpy` version conflicts) and fixes them without human intervention.
-*   **💻 Resource Awareness**: Detects available hardware (e.g., "4x NVIDIA L40S") and dynamically adjusts batch sizes and training strategies to prevent OOM errors.
-*   **🔬 Scientific Verification**: Parses the PDF to find the "Gold Standard" result table and writes python code to compare reproduced metrics against claims ($\pm$ 5% margin).
+*   **Supervisor Multi-Agent Architecture**: Orchestrates specialized agents (Supervisor, Planning, Environment, Execution, Validation) via a LangGraph cyclic state machine.
+*   **Self-Healing Environment**: Detects broken dependencies (e.g., `numpy` version conflicts, deprecated TensorFlow APIs) and resolves them autonomously.
+*   **Resource Awareness**: Detects available hardware (e.g., "4x NVIDIA L40S" or laptop MX250) and adjusts batch sizes and training strategies to prevent OOM errors.
+*   **Scientific Verification**: Extracts expected metrics from the paper PDF and compares reproduced results within a configurable tolerance (default $\pm$ 5%).
 
 ---
 
-## 🏗️ Architecture: Supervisor Multi-Agent System
+## 🏗️ Architecture
 
 ```mermaid
 graph TD
@@ -32,15 +32,29 @@ graph TD
     F -- "Approved" --> G(Execution Agent);
     F -- "Blocked" --> B;
     E -- "Error" --> B;
-    B --> G; 
+    B --> G;
     G --> H(Validation Agent);
     H --> I[Final Report];
 ```
 
 **Core Components:**
-*   **Supervisor Agent** (`src/agents/supervisor_agent.py`): The brain of the system. Uses hierarchical context to route tasks and handle failures cyclically.
-*   **Orchestrator** (`src/orchestrator.py`): Manages the state graph (LangGraph) and passes control between agents.
-*   **Critic Agent**: Intercepts potentially dangerous actions (e.g., file deletion) before execution.
+*   **Supervisor Agent** (`src/agents/supervisor_agent.py`): Routes tasks and handles failures cyclically — can route backwards (e.g., Execution → Environment Setup) to recover from errors.
+*   **Orchestrator** (`src/orchestrator.py`): Manages the LangGraph state machine and passes control between agents.
+*   **Critic Agent** (`src/agents/critic_agent.py`): Intercepts potentially dangerous actions (e.g., `rm -rf`, destructive `sed`) before execution.
+*   **Planning Agent**: Analyzes the paper and repository to create a structured reproduction checklist.
+*   **Environment / Execution / Validation Agents**: Handle setup, experiment execution, and result verification respectively.
+
+### Architecture Highlights
+
+**Cyclic Error Recovery** — Unlike linear pipelines, the Supervisor classifies errors semantically (environment, data, execution, validation) and routes back to the appropriate agent. A missing package triggers Environment Setup; a missing dataset triggers Data Prep.
+
+**Hierarchical Context Memory** — A 3-tier memory system (Hot/Warm/Cold) prevents context window overflow during long runs. Relevant past context is retrieved using a multi-factor scoring formula:
+
+```
+Score = 0.4 × Semantic_Similarity + 0.3 × Recency + 0.2 × Importance + 0.1 × Source_Authority
+```
+
+**Safety Guardrails** — The Critic agent intercepts every Execution action and blocks potentially destructive operations, requiring the agent to justify its reasoning before proceeding.
 
 ---
 
@@ -56,7 +70,7 @@ pip install -e .
 ### 2. Reproduce a Paper
 ```bash
 # Reproduce a paper by arXiv ID
-python src/cli.py reproduce 2310.12345
+python src/cli.py reproduce 1609.02907
 
 # Reproduce from a local PDF
 python src/cli.py reproduce ./downloads/my_paper.pdf
@@ -71,25 +85,24 @@ python src/cli.py verify
 
 ## 📊 Benchmarks
 
-We rigorously test this agent against a "Challenge Dataset" of papers known for reproducibility issues.
+| Paper | Domain | Challenge | Status | Key Result | Cost |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **[1609.02907] GCN** | Graph Learning | Legacy Debt (TF 1.x, 2016) | ✅ Full | 6/7 metrics matched | $0.95 |
+| **[1710.10903] GAT** | Graph Learning | CPU-only execution | ✅ Full | 82.7% (paper: 83.0 ± 0.7%) | $0.89 |
+| **[2406.03386] NeuralWalker** | GNNs | Multi-GPU scale | ⚠️ Partial | ZINC: 0.0636 ± 0.0004 | — |
 
-| Paper ID | Domain | Challenge | Status | Variance |
-| :--- | :--- | :--- | :--- | :--- |
-| **[2406.03386] NeuralWalker** | GNNs | Scale & OOM | ✅ Success | $\pm$ 0.0004 |
-| **[1609.02907] GCN** | GNNs | Legacy Debt (2016) | ✅ Success | Matched (1/1) |
-| **[1810.04805] BERT** | NLP | Code Rot (2018) | ⏳ Testing | - |
-
-*See [BENCHMARK.md](BENCHMARK.md) for full scientific audit details.*
+*See [BENCHMARK.md](BENCHMARK.md) for detailed results and analysis.*
 
 ---
 
 ## 🛠️ Project Structure
 
-*   `src/cli.py` - Main entry point (Click-based CLI).
-*   `src/orchestrator.py` - LangGraph state machine definition.
-*   `src/agents/` - specialized agent logic (Environment, Reproduction).
-*   `src/tools/` - Sandbox-safe execution tools.
-*   `.github/workflows` - CI/CD pipeline for automated testing.
+*   `src/cli.py` — Main entry point (Click-based CLI)
+*   `src/orchestrator.py` — LangGraph state machine definition
+*   `src/agents/` — Specialized agent logic (Supervisor, Planning, Environment, Execution, Validation, Critic)
+*   `src/tools/` — Sandboxed execution and search tools
+*   `src/utils/` — Hierarchical context, metrics tracking, resource detection
+*   `.github/workflows/` — CI pipeline (lint + unit tests)
 
 ---
 
@@ -97,6 +110,6 @@ We rigorously test this agent against a "Challenge Dataset" of papers known for 
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## 📄 technical Details
+## 📄 Technical Details
 
-For a deep dive into the code and agent logic, see [docs/INTERNAL_README.md](docs/INTERNAL_README.md).
+For a deep dive into the architecture and agent internals, see [ARCHITECTURE.md](ARCHITECTURE.md).

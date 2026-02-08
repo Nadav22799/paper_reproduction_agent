@@ -667,6 +667,10 @@ class HierarchicalContextManager:
 
         Uses provided LLM summarization function to compress context.
 
+        .. note::
+            TODO: Wire into pipeline for V2 — compress warm storage into
+            cold summaries during long-running reproductions.
+
         Args:
             summarize_fn: Function that takes text and returns summary
             max_entries: Maximum entries to include in summary

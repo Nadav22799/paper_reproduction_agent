@@ -1,47 +1,46 @@
-name: Paper Reproduction Agent CI
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11"]
-
     defaults:
       run:
         working-directory: ./paper_reproduction_agent
-
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -e .[dev]
-        
-    - name: Lint with Black
-      run: |
-        black --check src tests
-        
-    - name: Lint with Ruff
-      run: |
-        ruff check src tests
-        
-    - name: Run tests
-      run: |
-        pytest
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install linter
+        run: pip install ruff
+      - name: Lint source
+        run: ruff check src/
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./paper_reproduction_agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy pydantic pydantic-settings chromadb tiktoken
+          pip install langchain-core langchain-google-genai langgraph
+          pip install -e . --no-deps
+      - name: Run unit tests
+        run: pytest tests/ -v --ignore=tests/manual

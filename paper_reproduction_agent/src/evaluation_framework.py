@@ -379,7 +379,7 @@ class ReproductionEvaluator:
                             == test_type.split("_")[1].upper()
                         ):
                             all_evaluations.append(evaluation)
-                except:
+                except Exception:
                     continue
 
         if not all_evaluations:

@@ -65,7 +65,8 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                                     thoughts = block.get("thought") or block.get("thinking") or block.get("content") or block.get("text")
                                 elif block.get("type") == "text" and any(k in block.get("text", "").lower()[:50] for k in ["thought", "reasoning"]):
                                     thoughts = block.get("text")
-                            if thoughts: break
+                            if thoughts:
+                                break
                     
                     # Method B: additional_kwargs (Thoughts, Reasoning, etc.)
                     if not thoughts and hasattr(message, "additional_kwargs"):
@@ -88,7 +89,8 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                     if thoughts:
                         self._log(f"\n💭 Reasoning:\n{thoughts}\n")
                         break
-                if thoughts: break
+                if thoughts:
+                    break
 
         # Check top-level LLM output as a fallback
         if not thoughts and hasattr(response, "llm_output") and response.llm_output:

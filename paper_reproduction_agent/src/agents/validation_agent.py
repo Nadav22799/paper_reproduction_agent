@@ -9,8 +9,8 @@ This agent uses a CODE-FIRST approach:
 
 import os
 import re
-from typing import Dict, List, Tuple
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from typing import Dict, List
+from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from ..tools.code_execution_tools import (
     read_file,
@@ -21,7 +21,6 @@ from ..tools.code_execution_tools import (
 )
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
-from ..utils.logging_callback import LoggingCallbackHandler
 
 
 class ValidationAgent:
@@ -87,13 +86,9 @@ class ValidationAgent:
              
         print(f"📊 Debug: Checklist Path='{checklist_path}'")
 
-        paper_results = state.get("paper_results", {})
-        experiment_results = state.get("experiment_results", {})
-
         # Read experiment selection mode and plan
         experiment_mode = str(state.get("experiment_selection_mode", "all")).lower()
         reproduction_plan = state.get("reproduction_plan", {})
-        selected_experiments = reproduction_plan.get("selected_experiments", [])
         selected_datasets = reproduction_plan.get("selected_datasets", [])
 
         print(f"📊 Debug: Mode='{experiment_mode}', Datasets={selected_datasets}")
@@ -294,7 +289,6 @@ Task:
                  experiments_total_count = 1
 
         # Extract Match Ratio if present (e.g., "Match Ratio: 1/1")
-        import re
         ratio_match = re.search(r"match ratio:\s*(\d+)/(\d+)", combined_output)
         if ratio_match:
             match_ratio = f"{ratio_match.group(1)}/{ratio_match.group(2)}"

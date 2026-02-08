@@ -131,7 +131,7 @@ class DiscoveryAgent:
                     # Only consider files > 100 bytes (not empty)
                     if stat.st_size > 100:
                         result["result_files"].append(str(path.relative_to(repo)))
-                except:
+                except Exception:
                     pass
 
         # Check for model checkpoints
@@ -151,7 +151,7 @@ class DiscoveryAgent:
                 try:
                     path = Path(match)
                     result["checkpoints"].append(str(path.relative_to(repo)))
-                except:
+                except Exception:
                     pass
 
         # Check for log files (for extracting metrics if no result files)
@@ -165,7 +165,7 @@ class DiscoveryAgent:
                     # Only logs > 1KB
                     if stat.st_size > 1024:
                         result["log_files"].append(str(path.relative_to(repo)))
-                except:
+                except Exception:
                     pass
 
         # Check for recently modified files (last 24 hours) that might contain results
@@ -190,7 +190,7 @@ class DiscoveryAgent:
                             ]
                         ):
                             result["recently_modified"].append(rel_path)
-                except:
+                except Exception:
                     pass
 
         # Determine if we have usable results

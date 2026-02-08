@@ -75,7 +75,8 @@ tmp/
 
 # Test and development directories
 test_paper/
-tests/
+/tests/
+**/tests/manual/
 docs/
 
 # ============================================================================

@@ -191,9 +191,10 @@ def verify():
 
     # Check 1: Core Imports
     try:
-        import torch
-        import langchain
-        import langgraph
+        import importlib.util
+        for _pkg in ("torch", "langchain", "langgraph"):
+            if importlib.util.find_spec(_pkg) is None:
+                raise ImportError(_pkg)
 
         checks.append(("✅ Core Dependencies", True))
     except ImportError as e:

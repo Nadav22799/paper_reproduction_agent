@@ -53,7 +53,7 @@ def search_file(path: str, query: str, max_results: int = 10) -> str:
                                         )
                                         if len(results) >= max_results:
                                             return "\n".join(results)
-                        except:
+                        except Exception:
                             pass
 
         if results:
@@ -451,7 +451,7 @@ def execute_python_code(
             # Clean up - remove the temporary script
             try:
                 os.remove(script_path)
-            except:
+            except OSError:
                 pass
 
             # Truncate output if too long
@@ -475,7 +475,7 @@ def execute_python_code(
             # Clean up on timeout
             try:
                 os.remove(script_path)
-            except:
+            except OSError:
                 pass
             return {
                 "stdout": "",
@@ -1141,7 +1141,7 @@ def _detect_conda_requirements(repo_path: str) -> Optional[Path]:
                         content = f.read()
                         if "channels:" in content or "dependencies:" in content:
                             return env_file
-                except:
+                except Exception:
                     pass
             else:
                 return env_file
