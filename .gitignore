@@ -58,14 +58,11 @@ Python-*.tgz
 cloned_repo/
 
 # Downloaded papers and datasets (anywhere in project)
-downloads/*
-**/downloads/*
-!downloads/.gitkeep
-!**/downloads/.gitkeep
+downloads/
+**/downloads/
 
 # Runtime logs
-logs/*
-!logs/.gitkeep
+logs/
 *.log
 
 # Temporary/trash files
@@ -78,6 +75,7 @@ test_paper/
 /tests/
 **/tests/manual/
 docs/
+examples/
 
 # ============================================================================
 # IDEs and Editors
@@ -138,12 +136,5 @@ Thumbs.db
 *.txt
 !requirements.txt
 !**/requirements.txt
-
-# ============================================================================
-# Keep Directory Structure
-# ============================================================================
-# Don't ignore .gitkeep files (used to preserve empty directory structure)
-!.gitkeep
-!**/.gitkeep
 
 bin/

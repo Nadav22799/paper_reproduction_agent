@@ -44,7 +44,7 @@ This document tracks the performance of the **Paper Reproduction Agent** across 
 | Pubmed | Cheby | 74.4% | **73.9%** | 0.67% | ✅ |
 | NELL | GCN | 66.0% | — | — | ⚠️ Dataset missing from repo |
 
-#### 🤖 Autonomous Engineering Analysis
+#### ⚙️ Engineering Analysis
 
 The agent demonstrated **autonomous ML engineering** by successfully bridging a **10-year technology gap** — running 2016 TensorFlow code on 2026 infrastructure.
 
@@ -86,7 +86,7 @@ The agent demonstrated **autonomous ML engineering** by successfully bridging a 
 |---------|-------|-------|------------|-------|--------|
 | Cora | GAT | 83.0 ± 0.7% | **82.7%** | -0.3% | ✅ |
 
-#### 🤖 Autonomous Engineering Analysis
+#### ⚙️ Engineering Analysis
 
 The agent demonstrated **hardware-agnostic execution** by successfully running a GPU-oriented paper on CPU-only hardware.
 
