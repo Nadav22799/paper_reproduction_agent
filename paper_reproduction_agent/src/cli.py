@@ -30,7 +30,9 @@ def cli():
 @click.option("--no-checkpoints", is_flag=True, help="Disable checkpoint/resume")
 @click.option("--max-iterations", default=50, help="Maximum tool iterations")
 @click.option("--max-cycles", default=5, help="Maximum recovery/validation cycles")
-def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycles):
+@click.option("--critic-mode", type=click.Choice(["auto", "critic"]), default=None,
+              help="auto=fully autonomous, critic=ask before dangerous actions")
+def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycles, critic_mode):
     """Reproduce a paper given its arXiv ID, URL, or Path.
 
     PAPER_INPUT can be:
@@ -64,6 +66,21 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
         click.echo(f"🚀 Starting reproduction for: {paper_input}")
         click.echo(f"🔄 Max cycles: {max_cycles}")
 
+        # Critic mode selection
+        if critic_mode is None:
+            click.echo("\n🛡️  Security Mode:")
+            click.echo("1. Auto (fully autonomous, recommended for speed)")
+            click.echo("2. Critic (ask before dangerous actions, recommended for safety)")
+            mode_choice = click.prompt(
+                "Please choose",
+                type=click.Choice(["1", "2"]),
+                default="1",
+                show_default=True,
+            )
+            critic_mode = "auto" if mode_choice == "1" else "critic"
+        os.environ["CRITIC_MODE"] = critic_mode
+        click.echo(f"🛡️  Critic mode: {critic_mode.upper()}")
+
         # Disable orchestrator's internal logging since we capture stdout
         orchestrator = PaperReproductionOrchestrator(
             enable_logging=False, enable_checkpoints=not no_checkpoints
@@ -95,6 +112,9 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
             "final_status": "",
             "report": "",
             "max_cycles": max_cycles,
+            "user_input_required": None,
+            "user_input_response": None,
+            "waiting_for_user": False,
         }
 
         # Try to resume from checkpoint
@@ -150,6 +170,50 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
 
         try:
             result = orchestrator.workflow.invoke(initial_state)
+
+            # Handle user input pause/resume loop
+            while result.get("final_status") == "waiting_for_user_input":
+                req = result.get("user_input_required", {})
+                click.echo("\n" + "=" * 60)
+                click.echo("  ACTION REQUIRED - Reproduction Paused")
+                click.echo("=" * 60)
+                click.echo(
+                    f"\n{req.get('description', 'User action needed before continuing:')}\n"
+                )
+
+                for i, item in enumerate(req.get("items", []), 1):
+                    click.echo(f"  {i}. [{item.get('name', 'Unknown')}]")
+                    if item.get("description"):
+                        click.echo(f"     {item['description']}")
+                    if item.get("instructions"):
+                        click.echo(f"     Instructions: {item['instructions']}")
+                    if item.get("env_var"):
+                        click.echo(f"     Set as: export {item['env_var']}=<your_value>")
+                click.echo()
+
+                # Collect user responses
+                responses = {}
+                for item in req.get("items", []):
+                    if item.get("type") == "api_key":
+                        value = click.prompt(
+                            f"  Enter {item.get('name', 'value')}",
+                            hide_input=True,
+                        )
+                        responses[item.get("env_var") or item.get("name", "key")] = value
+                    else:
+                        click.confirm(
+                            f"  Have you completed: {item.get('name', 'this step')}?",
+                            default=True,
+                        )
+                        responses[item.get("name", "step")] = "provided"
+
+                # Resume workflow with user input
+                result["user_input_response"] = responses
+                result["waiting_for_user"] = False
+                result["final_status"] = ""
+                click.echo("\n🔄 Resuming reproduction...\n")
+                result = orchestrator.workflow.invoke(result)
+
         finally:
             # Stop metrics tracking
             orchestrator.metrics_tracker.end_workflow()

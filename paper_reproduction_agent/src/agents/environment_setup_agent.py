@@ -27,6 +27,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from ..utils.llm_factory import create_llm
 from ..utils.logging_callback import LoggingCallbackHandler
 from ..utils.hierarchical_context import HierarchicalContextManager
+from ..utils.tool_guard import guard_tool
 
 
 class EnvironmentSetupAgent:
@@ -39,6 +40,7 @@ class EnvironmentSetupAgent:
         metrics_tracker=None,
         callbacks=None,
         hierarchical_context: HierarchicalContextManager = None,
+        critic_mode: str = "auto",
     ):
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
@@ -49,13 +51,13 @@ class EnvironmentSetupAgent:
         from ..config.prompts import ENVIRONMENT_AGENT_PROMPT
         self.system_prompt = ENVIRONMENT_AGENT_PROMPT
 
-        # Tools for environment setup
+        # Tools for environment setup (dangerous tools wrapped with safety guards)
         self.tools = [
             # Core file operations
             read_file,
             list_directory,
-            execute_shell_command,
-            execute_python_code,
+            guard_tool(execute_shell_command, mode=critic_mode),
+            guard_tool(execute_python_code, mode=critic_mode),
             check_python_compatibility,
             # Common utilities (hard to replicate with bash)
             grep_in_directory,
@@ -194,10 +196,10 @@ class EnvironmentSetupAgent:
 
             # Store results in hierarchical context for next agent
             if self.hierarchical_context:
-                from ..utils.context_utils import build_context_entry
+                from ..utils.context_utils import build_smart_context_entry
 
                 messages = result.get("messages", [])
-                context_entry = build_context_entry(
+                context_entry = build_smart_context_entry(
                     agent_name="environment_setup",
                     result=result_summary,
                     messages=messages,

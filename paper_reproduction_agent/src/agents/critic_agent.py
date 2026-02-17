@@ -13,30 +13,14 @@ import json
 from datetime import datetime
 from typing import Dict, List, Tuple
 from langchain_google_genai import ChatGoogleGenerativeAI
+from ..utils.tool_guard import FORBIDDEN_PATTERNS
 
 
 class CriticAgent:
     """Inspects and validates agent actions before execution."""
 
-    # Forbidden command patterns with explanations
-    FORBIDDEN_PATTERNS: List[Tuple[str, str]] = [
-        (r"git\s+clone", "Clone operations are handled by orchestrator"),
-        (r"rm\s+-rf\s+/", "Dangerous: recursive delete from root"),
-        (r"rm\s+-rf\s+~", "Dangerous: recursive delete from home"),
-        (r"rm\s+-rf\s+\*", "Dangerous: recursive delete with wildcard"),
-        (r"sudo\s+", "No privilege escalation allowed"),
-        (r"curl.*\|\s*(?:bash|sh)", "No pipe to shell from curl"),
-        (r"wget.*\|\s*(?:bash|sh)", "No pipe to shell from wget"),
-        (r"pip\s+install\s+--user", "Use virtual environment, not --user"),
-        (r"conda\s+activate\s+base", "Do not modify base environment"),
-        (r"conda\s+install\s+-n\s+base", "Do not modify base environment"),
-        (r"pip\s+install.*--break-system-packages", "Do not break system packages"),
-        (r"chmod\s+777", "Overly permissive file permissions"),
-        (r"eval\s*\(", "No eval of arbitrary code"),
-        (r"exec\s*\(", "No exec of arbitrary code"),
-        (r"os\.system\s*\(", "Use subprocess instead of os.system"),
-        (r"__import__\s*\(", "No dynamic imports"),
-    ]
+    # Forbidden command patterns — single source of truth in tool_guard.py
+    FORBIDDEN_PATTERNS: List[Tuple[str, str]] = FORBIDDEN_PATTERNS
 
     # Required reasoning keywords for certain tool types
     REASONING_REQUIREMENTS: Dict[str, List[str]] = {

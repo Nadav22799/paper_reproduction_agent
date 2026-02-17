@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Multi-agent system for reproducing and verifying academic paper implementations"
 requires-python = ">=3.10"
 dependencies = [
-    "accelerate>=1.10.1",
     "anthropic>=0.69.0",
     "arxiv>=2.2.0",
     "beautifulsoup4>=4.14.2",
@@ -33,9 +32,8 @@ dependencies = [
     "rich>=14.2.0",
     "scikit-learn>=1.7.2",
     "tenacity>=9.1.2",
-    "torch>=2.8.0",
+    "torch>=2.4.0",
     "tqdm>=4.67.1",
-    "transformers>=4.57.0",
 ]
 
 [project.optional-dependencies]

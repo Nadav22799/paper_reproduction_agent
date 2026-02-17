@@ -21,6 +21,7 @@ from ..tools.code_execution_tools import (
 )
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
+from ..utils.tool_guard import guard_tool
 
 
 class DataPrepAgent:
@@ -33,6 +34,7 @@ class DataPrepAgent:
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
         callbacks=None,
+        critic_mode: str = "auto",
     ):
         """Initialize the Data Preparation Agent.
 
@@ -41,6 +43,7 @@ class DataPrepAgent:
             max_iterations: Maximum iterations for the ReAct agent
             metrics_tracker: Optional metrics tracker for observability
             hierarchical_context: Shared context manager for cross-agent knowledge
+            critic_mode: "auto" or "critic" for tool call safety mode
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
@@ -54,8 +57,8 @@ class DataPrepAgent:
         self.tools = [
             read_file,
             list_directory,
-            execute_shell_command,
-            execute_python_code,
+            guard_tool(execute_shell_command, mode=critic_mode),
+            guard_tool(execute_python_code, mode=critic_mode),
             search_error_solution,
         ]
 
@@ -80,6 +83,16 @@ class DataPrepAgent:
         checklist_path = state.get("checklist_path", "")
         env_info = state.get("agent_contexts", {}).get("environment_setup", {})
         env_name = env_info.get("env_name", "")
+
+        # Apply user-provided credentials (API keys, tokens) as environment variables
+        user_response = state.get("user_input_response", {})
+        if user_response:
+            for key, value in user_response.items():
+                if value and value != "provided":
+                    # Derive env var name: "HuggingFace Token" -> "HUGGINGFACE_TOKEN"
+                    env_var = key.upper().replace(" ", "_").replace("-", "_")
+                    os.environ[env_var] = value
+                    print(f"   🔑 Set environment variable: {env_var}")
 
         print("📦 Data Prep Agent: Preparing datasets...")
 
@@ -172,7 +185,7 @@ Start by analyzing the provided context."""
 
             # Store FULL messages in hierarchical context (including tool calls)
             if self.hierarchical_context:
-                from ..utils.context_utils import build_context_entry
+                from ..utils.context_utils import build_smart_context_entry
 
                 messages = result.get("messages", [])
                 data_result = {
@@ -180,7 +193,7 @@ Start by analyzing the provided context."""
                     "dataset_results": details,
                 }
 
-                context_entry = build_context_entry(
+                context_entry = build_smart_context_entry(
                     agent_name="data_prep",
                     result=data_result,
                     messages=messages,

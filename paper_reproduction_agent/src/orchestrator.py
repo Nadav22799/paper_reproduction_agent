@@ -133,6 +133,11 @@ class PaperReproductionState(TypedDict):
     cycle_count: int                    # Prevent infinite loops
     max_cycles: int                     # Default: 5
 
+    # === NEW: USER INPUT GATE ===
+    user_input_required: Optional[dict]   # {description, items: [{name, type, description, instructions}]}
+    user_input_response: Optional[dict]   # User's responses (filled by CLI)
+    waiting_for_user: bool                # Whether workflow is paused for user input
+
 
 class PaperReproductionOrchestrator:
     """Orchestrator for paper reproduction workflow.
@@ -250,6 +255,7 @@ class PaperReproductionOrchestrator:
             metrics_tracker=self.metrics_tracker,
             callbacks=[self.logging_callback] if self.logging_callback else [],
             hierarchical_context=self.hierarchical_context,
+            critic_mode=self.config.critic_mode,
         )
         self.unified_reproducer = UnifiedReproductionAgent(
             self.llm,
@@ -305,6 +311,7 @@ class PaperReproductionOrchestrator:
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
+            critic_mode=self.config.critic_mode,
         )
         self.execution_agent = ExecutionAgent(
             self.reasoning_llm,
@@ -312,6 +319,7 @@ class PaperReproductionOrchestrator:
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
+            critic_mode=self.config.critic_mode,
         )
         self.validation_agent = ValidationAgent(
             self.reasoning_llm,
@@ -463,8 +471,15 @@ class PaperReproductionOrchestrator:
             },
         )
 
-        # === PLANNING -> SUPERVISOR ===
-        workflow.add_edge("planning", "supervisor")
+        # === PLANNING -> USER INPUT GATE -> SUPERVISOR ===
+        workflow.add_conditional_edges(
+            "planning",
+            self._route_after_planning,
+            {
+                "continue": "supervisor",
+                "pause": "generate_report",
+            },
+        )
 
         # === SUPERVISOR ROUTING (the brain) ===
         workflow.add_conditional_edges(
@@ -586,6 +601,16 @@ class PaperReproductionOrchestrator:
         state["checklist_path"] = result.get("checklist_path", "")
         state["phase_status"] = result.get("phase_status", state.get("phase_status", {}))
         state["planning_update_request"] = None  # Clear request
+
+        # Check if planning detected user input requirements
+        user_input_req = result.get("user_input_required")
+        if user_input_req and not state.get("user_input_response"):
+            state["user_input_required"] = user_input_req
+            state["waiting_for_user"] = True
+            state["final_status"] = "waiting_for_user_input"
+            print("⏸️  Planning detected user input requirements — workflow will pause")
+            for item in user_input_req.get("items", []):
+                print(f"   - {item.get('name', 'unknown')}: {item.get('description', '')[:80]}")
 
         # Store and optionally print reasoning
         state["current_reasoning"] = result.get("last_message", "")
@@ -805,6 +830,14 @@ class PaperReproductionOrchestrator:
         return state
 
     # === NEW SUPERVISOR ARCHITECTURE ROUTING FUNCTIONS ===
+
+    def _route_after_planning(
+        self, state: PaperReproductionState
+    ) -> Literal["continue", "pause"]:
+        """Route after planning — pause if user input is needed."""
+        if state.get("waiting_for_user", False):
+            return "pause"
+        return "continue"
 
     def _route_after_clone_supervisor(
         self, state: PaperReproductionState
@@ -1836,6 +1869,11 @@ class PaperReproductionOrchestrator:
         self, state: PaperReproductionState
     ) -> PaperReproductionState:
         """Generate final report."""
+        # If workflow is paused for user input, skip report generation
+        if state.get("final_status") == "waiting_for_user_input":
+            print("⏸️  Workflow paused for user input — skipping report generation")
+            return state
+
         # Note: We always regenerate the report even when resuming, to ensure it's up-to-date
         # But we still mark it as completed for tracking purposes
         self.metrics_tracker.start_phase("generate_report")
@@ -2661,6 +2699,9 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                 "messages": [],
                 "final_status": "",
                 "report": "",
+                "user_input_required": None,
+                "user_input_response": None,
+                "waiting_for_user": False,
             }
             # Update with resumed state
             initial_state.update(resumed_state)
@@ -2694,6 +2735,9 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                 "messages": [],
                 "final_status": "",
                 "report": "",
+                "user_input_required": None,
+                "user_input_response": None,
+                "waiting_for_user": False,
             }
 
         try:

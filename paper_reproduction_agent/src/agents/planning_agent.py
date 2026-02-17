@@ -176,6 +176,36 @@ Set "**Skip Data Prep:** NO" if:
 - Preprocessing scripts must be run first
 
 After creating the checklist, respond with a summary of what you found.
+
+═══════════════════════════════════════════════════════════════
+PHASE 3: DETECT USER INPUT REQUIREMENTS
+═══════════════════════════════════════════════════════════════
+
+Based ONLY on the paper, README, and files you already read during Phases 1-2
+(do NOT read additional files or list directories for this — use what you already know),
+quickly determine if reproduction requires ANY of:
+- API keys for LLM services (OpenAI, HuggingFace tokens, Weights & Biases, Comet ML, etc.)
+- Paid or licensed datasets that require purchase, application, or manual approval
+- Manual account creation or credential setup (e.g., registering on a website)
+- Private model weights requiring authentication tokens
+- Any external resource the system cannot access autonomously
+
+If NOTHING is required, simply skip this section and move on.
+If user input IS required, add this section to the checklist:
+
+```markdown
+## User Input Required
+**Status:** PENDING
+
+**Items:**
+- [ ] {item_name} - Type: {api_key|dataset_access|credentials|other}
+  Description: {what it is and why it's needed}
+  Instructions: {step-by-step how to obtain it}
+  Environment Variable: {VAR_NAME to set, if applicable}
+```
+
+Be specific in the instructions — tell the user exactly where to go and what to do.
+If no user input is required, do NOT add this section.
 """
 
         # Minimal tools for planning - mostly reading
@@ -368,7 +398,7 @@ Start by listing the repository contents."""
 
             # Store FULL messages in hierarchical context (including tool calls)
             if self.hierarchical_context:
-                from ..utils.context_utils import build_context_entry
+                from ..utils.context_utils import build_smart_context_entry
 
                 planning_result = {
                     "plan_created": True,
@@ -377,7 +407,7 @@ Start by listing the repository contents."""
                     "experiment_mode": experiment_mode,
                 }
 
-                context_entry = build_context_entry(
+                context_entry = build_smart_context_entry(
                     agent_name="planning",
                     result=planning_result,
                     messages=messages,
@@ -404,7 +434,10 @@ Start by listing the repository contents."""
                     skip_data_prep=should_skip_data_prep
                 )
 
-            return {
+            # Detect user input requirements from checklist
+            user_input_req = self._detect_user_input_requirements(checklist_path)
+
+            result_dict = {
                 "reproduction_plan": plan,
                 "checklist_path": checklist_path,
                 "phase_status": {
@@ -417,6 +450,11 @@ Start by listing the repository contents."""
                 "planning_update_request": None,  # Clear any pending requests
                 "last_message": last_message,  # Agent reasoning for verbose output
             }
+
+            if user_input_req:
+                result_dict["user_input_required"] = user_input_req
+
+            return result_dict
 
         except Exception as e:
             print(f"⚠️  Planning Agent error: {e}")
@@ -586,6 +624,105 @@ Preserve the existing structure and add the new items.
                 break
 
         return plan
+
+    def _detect_user_input_requirements(self, checklist_path: str) -> Optional[dict]:
+        """Parse checklist for '## User Input Required' section written by the LLM.
+
+        The planning agent's Phase 3 prompt instructs the LLM to analyze
+        the README and write situation-specific instructions when it detects
+        the paper needs API keys, paid datasets, credentials, etc.
+
+        This method extracts the LLM's structured output into a dict
+        so the CLI can display it clearly to the user.
+
+        Args:
+            checklist_path: Path to reproduction_checklist.md
+
+        Returns:
+            Dict with description and items, or None if no user input needed.
+        """
+        import re
+
+        if not os.path.exists(checklist_path):
+            return None
+
+        try:
+            with open(checklist_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return None
+
+        # Look for the User Input Required section
+        match = re.search(
+            r"##\s*User Input Required\s*\n(.*?)(?=\n##\s|\Z)",
+            content,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        section = match.group(1)
+
+        # Skip if the section says nothing is needed
+        if "PENDING" not in section and "- [" not in section:
+            return None
+
+        # Parse individual items from the LLM-generated section
+        # Expected format from Phase 3 prompt:
+        #   - [ ] {name} - Type: {type}
+        #     Description: {what and why}
+        #     Instructions: {step-by-step}
+        #     Environment Variable: {VAR_NAME}
+        items = []
+        item_blocks = re.findall(
+            r"-\s*\[[ x]?\]\s*(.+?)(?=\n-\s*\[|\Z)",
+            section,
+            re.DOTALL,
+        )
+
+        for block in item_blocks:
+            lines = block.strip().split("\n")
+            if not lines:
+                continue
+
+            # First line: name - Type: type
+            header = lines[0].strip()
+            name_match = re.match(r"(.+?)\s*-\s*Type:\s*(\w+)", header)
+            if name_match:
+                name = name_match.group(1).strip()
+                item_type = name_match.group(2).strip()
+            else:
+                name = header
+                item_type = "other"
+
+            description = ""
+            instructions = ""
+            env_var = ""
+
+            for line in lines[1:]:
+                line = line.strip()
+                if line.lower().startswith("description:"):
+                    description = line.split(":", 1)[1].strip()
+                elif line.lower().startswith("instructions:"):
+                    instructions = line.split(":", 1)[1].strip()
+                elif line.lower().startswith("environment variable:"):
+                    env_var = line.split(":", 1)[1].strip()
+
+            items.append({
+                "name": name,
+                "type": item_type,
+                "description": description or name,
+                "instructions": instructions,
+                "env_var": env_var,
+            })
+
+        if not items:
+            return None
+
+        return {
+            "description": "The paper requires the following before reproduction can proceed:",
+            "items": items,
+        }
 
     def _create_basic_checklist(
         self, checklist_path: str, paper_title: str, repo_url: str,

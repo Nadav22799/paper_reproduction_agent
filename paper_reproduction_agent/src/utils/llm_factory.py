@@ -105,7 +105,7 @@ def _create_claude_llm(temperature: float):
 class GeminiEmbedder:
     """Gemini API-based embedder matching SentenceTransformer interface.
 
-    Uses Google's text-embedding-004 model for fast, API-based embeddings.
+    Uses Google's gemini-embedding-001 model for fast, API-based embeddings.
     No local model loading required - saves ~100MB RAM.
     """
 
@@ -113,10 +113,10 @@ class GeminiEmbedder:
         """Initialize Gemini embedder.
 
         Args:
-            model: Embedding model name (default: from EMBEDDING_MODEL env var or text-embedding-004)
+            model: Embedding model name (default: from EMBEDDING_MODEL env var or gemini-embedding-001)
             metrics_tracker: Optional MetricsTracker for token tracking
         """
-        self.model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+        self.model = model or os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
         self._client = None
         self.metrics_tracker = metrics_tracker
 
@@ -144,7 +144,7 @@ class GeminiEmbedder:
             text: Text to embed
 
         Returns:
-            np.ndarray: Embedding vector (768 dimensions for text-embedding-004)
+            np.ndarray: Embedding vector (768 dimensions for gemini-embedding-001)
         """
         import numpy as np
 

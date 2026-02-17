@@ -51,6 +51,12 @@ class ReproductionConfig(BaseModel):
         default_factory=lambda: os.getenv("ENABLE_LLM_CRITIC", "false").lower() == "true"
     )
 
+    # Critic mode: "auto" (fully autonomous, blocks silently) or
+    # "critic" (asks user approval for potentially dangerous actions)
+    critic_mode: str = Field(
+        default_factory=lambda: os.getenv("CRITIC_MODE", "auto")
+    )
+
     # Embedding provider for hierarchical context: "gemini", "openai", "local", or "none"
     # "gemini" uses API (fast, no local model loading)
     # "local" uses SentenceTransformer (slower, 100MB RAM)
@@ -61,7 +67,7 @@ class ReproductionConfig(BaseModel):
 
     # Embedding model (for API providers)
     embedding_model: str = Field(
-        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
     )
 
     def _resolve_path(self, path_name: str) -> str:

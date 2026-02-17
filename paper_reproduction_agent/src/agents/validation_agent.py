@@ -197,7 +197,7 @@ Task:
 
             # Store FULL messages in hierarchical context (including tool calls)
             if self.hierarchical_context:
-                from ..utils.context_utils import build_context_entry
+                from ..utils.context_utils import build_smart_context_entry
 
                 validation_result = {
                     "results_match": verification["success"],
@@ -205,7 +205,7 @@ Task:
                     "success_level": verification["success_level"],
                 }
 
-                context_entry = build_context_entry(
+                context_entry = build_smart_context_entry(
                     agent_name="validation",
                     result=validation_result,
                     messages=all_messages,

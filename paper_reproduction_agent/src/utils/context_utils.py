@@ -187,3 +187,190 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return len(text) // 4
+
+
+# =============================================================================
+# Smart Context Entry — Last N iterations + structured summary
+# =============================================================================
+
+
+def build_smart_context_entry(
+    agent_name: str,
+    result: Dict,
+    messages: list,
+    last_n: int = 3,
+    max_detail_tokens: int = 5000,
+) -> str:
+    """Build a context entry focused on RECENT iterations + structured summary.
+
+    Instead of iterating all messages from the start (and truncating early),
+    this takes the LAST N ReAct iterations (where final outcomes live)
+    plus a structured success/failure summary header.
+
+    Args:
+        agent_name: Name of the agent
+        result: Agent's result dictionary
+        messages: Full messages from agent.invoke()
+        last_n: Number of recent iterations to include (default: 3)
+        max_detail_tokens: Token budget for the detail section
+
+    Returns:
+        Formatted context entry string
+    """
+    # Section 1: Structured summary header
+    key_facts = extract_key_facts(agent_name, result)
+    success = _determine_success(agent_name, result)
+
+    header = (
+        f"=== {agent_name.upper()} AGENT ===\n"
+        f"STATUS: {'SUCCESS' if success else 'FAILED'}\n"
+        f"KEY FACTS:\n{key_facts}\n"
+    )
+
+    # Section 2: Extract and format last N iterations
+    iterations = _extract_iterations(messages)
+    recent = iterations[-last_n:] if iterations else []
+    total_count = len(iterations)
+
+    remaining_tokens = max_detail_tokens - estimate_tokens(header)
+    detail = _format_recent_iterations(recent, total_count, remaining_tokens)
+
+    return (
+        f"{header}\n"
+        f"RECENT TRACE (last {len(recent)} of {total_count} iterations):\n"
+        f"{detail}\n"
+        f"{'=' * 40}"
+    )
+
+
+def _determine_success(agent_name: str, result: Dict) -> bool:
+    """Determine if agent succeeded based on its result dict."""
+    mapping = {
+        "environment_setup": "success",
+        "execution": "experiments_completed",
+        "data_prep": "datasets_ready",
+        "validation": "results_match",
+    }
+    key = mapping.get(agent_name, "success")
+    return bool(result.get(key, False))
+
+
+def _extract_iterations(messages: list) -> list:
+    """Group messages into ReAct iteration cycles.
+
+    Each cycle is: AIMessage (reasoning + tool_calls) followed by ToolMessage(s).
+    A new AIMessage after ToolMessage(s) starts a new cycle.
+
+    Args:
+        messages: List of LangChain messages from agent.invoke()
+
+    Returns:
+        List of lists, where each inner list is one ReAct iteration.
+    """
+    iterations = []
+    current = []
+
+    for msg in messages:
+        msg_type = type(msg).__name__
+
+        if msg_type == "HumanMessage" and not current:
+            # Skip initial prompt — not part of iteration cycles
+            continue
+        elif msg_type == "AIMessage":
+            # If we already have an AIMessage in the current cycle,
+            # this starts a new iteration
+            if current and any(type(m).__name__ == "AIMessage" for m in current):
+                iterations.append(current)
+                current = []
+            current.append(msg)
+        else:
+            # ToolMessage or other — add to current cycle
+            current.append(msg)
+
+    # Don't forget the last iteration
+    if current:
+        iterations.append(current)
+
+    return iterations
+
+
+def _format_iteration(iteration: list, number: int) -> str:
+    """Format a single ReAct iteration with full detail.
+
+    Args:
+        iteration: List of messages in this iteration
+        number: Iteration number for display
+
+    Returns:
+        Formatted string for this iteration
+    """
+    parts = [f"[Iteration {number}]"]
+
+    for msg in iteration:
+        msg_type = type(msg).__name__
+        content = ""
+
+        # Extract text content
+        if hasattr(msg, "content"):
+            if isinstance(msg.content, str):
+                content = msg.content
+            elif isinstance(msg.content, list):
+                text_parts = []
+                for p in msg.content:
+                    if isinstance(p, str):
+                        text_parts.append(p)
+                    elif isinstance(p, dict) and "text" in p:
+                        text_parts.append(p["text"])
+                content = "\n".join(text_parts)
+
+        # Include tool calls with names and args
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tool_name = tc.get("name", "unknown")
+                args_str = str(tc.get("args", {}))
+                if len(args_str) > 500:
+                    args_str = args_str[:500] + "..."
+                content += f"\n[TOOL: {tool_name}] {args_str}"
+
+        if content and content.strip():
+            truncated = content.strip()
+            if len(truncated) > 3000:
+                truncated = truncated[:3000] + "..."
+            parts.append(f"  [{msg_type}] {truncated}")
+
+    return "\n".join(parts)
+
+
+def _format_recent_iterations(
+    recent: list, total_count: int, max_tokens: int
+) -> str:
+    """Format last N iterations within a token budget.
+
+    Args:
+        recent: List of recent iteration message groups
+        total_count: Total number of iterations (for numbering)
+        max_tokens: Token budget for the entire section
+
+    Returns:
+        Formatted string of recent iterations
+    """
+    parts = []
+    remaining = max_tokens
+
+    for i, iteration in enumerate(recent):
+        # Calculate actual iteration number
+        number = total_count - len(recent) + i + 1
+        text = _format_iteration(iteration, number)
+        tokens = estimate_tokens(text)
+
+        if tokens <= remaining:
+            parts.append(text)
+            remaining -= tokens
+        else:
+            # Truncate this iteration to fit remaining budget
+            char_limit = remaining * 4  # rough tokens-to-chars
+            if char_limit > 0:
+                parts.append(text[:char_limit] + "... (truncated)")
+            break
+
+    return "\n---\n".join(parts) if parts else "No iterations available"

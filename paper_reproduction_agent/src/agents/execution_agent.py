@@ -27,6 +27,7 @@ from ..tools.code_execution_tools import (
 from ..utils.llm_factory import create_llm
 from ..utils.resource_detector import detect_system_resources, get_experiment_strategy
 from ..utils.hierarchical_context import HierarchicalContextManager
+from ..utils.tool_guard import guard_tool
 
 
 class ExecutionAgent:
@@ -39,6 +40,7 @@ class ExecutionAgent:
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
         callbacks=None,
+        critic_mode: str = "auto",
     ):
         """Initialize the Execution Agent.
 
@@ -47,6 +49,7 @@ class ExecutionAgent:
             max_iterations: Maximum iterations for the ReAct agent
             metrics_tracker: Optional metrics tracker for observability
             hierarchical_context: Shared context manager for cross-agent knowledge
+            critic_mode: "auto" or "critic" for tool call safety mode
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
@@ -65,9 +68,9 @@ class ExecutionAgent:
             read_file,
             list_directory,
             write_file,
-            execute_shell_command,
-            execute_python_code,
-            start_background_process,
+            guard_tool(execute_shell_command, mode=critic_mode),
+            guard_tool(execute_python_code, mode=critic_mode),
+            guard_tool(start_background_process, mode=critic_mode),
             wait_for_process,
             stop_process,
             search_error_solution,
@@ -316,7 +319,7 @@ Start by reading the checklist to confirm tool, environment, and experiment list
 
             # Store FULL messages in hierarchical context (including tool calls)
             if self.hierarchical_context:
-                from ..utils.context_utils import build_context_entry
+                from ..utils.context_utils import build_smart_context_entry
 
                 messages = result.get("messages", [])
                 exec_result = {
@@ -327,7 +330,7 @@ Start by reading the checklist to confirm tool, environment, and experiment list
                     "error": error_info.get("error_message") if not success else None,
                 }
 
-                context_entry = build_context_entry(
+                context_entry = build_smart_context_entry(
                     agent_name="execution",
                     result=exec_result,
                     messages=messages,

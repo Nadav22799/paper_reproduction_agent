@@ -27,6 +27,15 @@ cloned_repo/
 MagicMock/
 verify_check.txt
 downloads/
+examples/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Temporary
 .1/
@@ -36,3 +45,7 @@ lib/
 include/
 share/
 
+
+# Safety
+node_modules/
+.next/
