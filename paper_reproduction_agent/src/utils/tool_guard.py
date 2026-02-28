@@ -16,8 +16,76 @@ Zero LLM cost. Sub-millisecond overhead per check.
 
 import re
 import copy
-from typing import List, Tuple, Optional
+import threading
+from typing import List, Tuple, Optional, Protocol, runtime_checkable
 from functools import wraps
+
+
+# ---------------------------------------------------------------------------
+# Cooperative cancellation — set by RunManager.stop_run(), checked before
+# every guarded tool call.  Uses BaseException so it propagates through
+# LangGraph / LangChain "except Exception" handlers and exits workflow.invoke().
+# ---------------------------------------------------------------------------
+
+class RunCancelled(BaseException):
+    """Raised to cancel the current run.
+
+    Inherits BaseException (not Exception) so it is NOT caught by the
+    broad ``except Exception`` blocks inside LangGraph node implementations,
+    and propagates cleanly out of ``workflow.invoke()``.
+    """
+
+
+_stop_event = threading.Event()
+
+
+def request_stop() -> None:
+    """Signal that the current run should be cancelled at the next tool call."""
+    _stop_event.set()
+
+
+def clear_stop() -> None:
+    """Clear the stop signal.  Must be called before starting each new run."""
+    _stop_event.clear()
+
+
+@runtime_checkable
+class ApprovalCallback(Protocol):
+    """Callback protocol for requesting human approval in critic mode.
+
+    Used to bridge the CLI ``input()`` flow with web-based approval UIs
+    (or any other approval mechanism) without coupling tool_guard to
+    either transport layer.
+    """
+
+    def request_approval(
+        self, tool_name: str, content: str, reason: str
+    ) -> Tuple[bool, str]:
+        """Request approval for a tool call.
+
+        Args:
+            tool_name: Name of the tool being called.
+            content: Command / code content (may be truncated for display).
+            reason: Why the call was flagged.
+
+        Returns:
+            (approved, feedback) — approved=True means execute, feedback
+            is an optional message from the reviewer (empty string if none).
+        """
+        ...
+
+
+# Module-level approval callback — None means fall back to CLI input()
+_approval_callback: Optional[ApprovalCallback] = None
+
+
+def set_approval_callback(callback: Optional[ApprovalCallback]) -> None:
+    """Register a callback for critic-mode approval requests.
+
+    Pass ``None`` to revert to the default CLI ``input()`` behaviour.
+    """
+    global _approval_callback
+    _approval_callback = callback
 
 
 # === Tier 1: Always blocked (universally dangerous) ===
@@ -118,6 +186,10 @@ def guard_tool(original_tool, mode: str = "auto"):
 
     @wraps(original_func)
     def safe_func(*args, **kwargs):
+        # Check for cancellation before executing any tool
+        if _stop_event.is_set():
+            raise RunCancelled("Run stopped by user")
+
         # Extract the command/code content to check
         content = _extract_checkable_content(guarded.name, args, kwargs)
 
@@ -132,11 +204,14 @@ def guard_tool(original_tool, mode: str = "auto"):
 
                 if tier == 2:
                     if mode == "critic":
-                        # Ask user for approval
-                        approved = _ask_user_approval(guarded.name, content, reason)
+                        # Ask user for approval (via callback or CLI)
+                        approved, feedback = _ask_user_approval(guarded.name, content, reason)
                         if approved:
                             return original_func(*args, **kwargs)
-                        return f"BLOCKED by user: {reason}. Try a safe alternative."
+                        msg = f"BLOCKED by user: {reason}."
+                        if feedback:
+                            msg += f" Feedback: {feedback}."
+                        return msg + " Try a safe alternative."
                     else:
                         # Auto mode — block with helpful suggestion
                         return f"BLOCKED: {reason}. {suggestion}"
@@ -156,11 +231,19 @@ def _extract_checkable_content(tool_name: str, args: tuple, kwargs: dict) -> str
     return ""
 
 
-def _ask_user_approval(tool_name: str, content: str, reason: str) -> bool:
+def _ask_user_approval(tool_name: str, content: str, reason: str) -> Tuple[bool, str]:
     """Pause and ask the user for approval in critic mode.
 
-    Returns True if approved, False if denied.
+    If a callback is registered (e.g. WebApprovalCallback), delegates to it.
+    Otherwise falls back to CLI ``input()``.
+
+    Returns:
+        (approved, feedback) — approved=True means execute.
     """
+    if _approval_callback is not None:
+        return _approval_callback.request_approval(tool_name, content, reason)
+
+    # CLI fallback
     print(f"\n{'='*60}")
     print(f"  CRITIC ALERT: {reason}")
     print(f"{'='*60}")
@@ -173,7 +256,7 @@ def _ask_user_approval(tool_name: str, content: str, reason: str) -> bool:
         approval = input("  Approve execution? [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         approval = "n"
-    return approval == "y"
+    return (approval == "y", "")
 
 
 def guard_tools(tools: list, mode: str = "auto") -> list:

@@ -28,6 +28,10 @@ MagicMock/
 verify_check.txt
 downloads/
 examples/
+experiments.db
+checkpoints/
+credentials/
+*.json.key
 
 # IDE
 .vscode/

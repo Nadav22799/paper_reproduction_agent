@@ -15,7 +15,9 @@ from langgraph.prebuilt import create_react_agent
 from ..tools.code_execution_tools import (
     read_file,
     list_directory,
+    write_file,
 )
+from ..tools.file_utils import grep_in_directory, find_files
 from langchain_community.tools import DuckDuckGoSearchRun
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
@@ -31,6 +33,8 @@ class PlanningAgent:
         metrics_tracker=None,
         hierarchical_context: HierarchicalContextManager = None,
         callbacks: List = None,
+        storage=None,
+        base_dir: str = None,
     ):
         """Initialize the Planning Agent.
 
@@ -39,19 +43,98 @@ class PlanningAgent:
             max_iterations: Maximum iterations for the ReAct agent
             metrics_tracker: Optional metrics tracker for observability
             hierarchical_context: Shared context manager for cross-agent knowledge
+            storage: Optional StorageProvider for checklist persistence
+            base_dir: Project base directory, used to compute relative storage keys
         """
         self.llm = llm or create_llm(temperature=0.1)
         self.max_iterations = max_iterations
         self.metrics_tracker = metrics_tracker
         self.hierarchical_context = hierarchical_context
         self.callbacks = callbacks or []
+        self._storage = storage
+        self._base_dir = base_dir
+        self._setup_prompt_and_tools()
 
+    # ── Storage helpers ──────────────────────────────────────────────────────
+
+    def _storage_key(self, path: str) -> str:
+        """Convert an absolute path to a storage key relative to base_dir."""
+        from pathlib import Path as _Path
+        if self._base_dir:
+            try:
+                return str(_Path(path).relative_to(self._base_dir)).replace("\\", "/")
+            except ValueError:
+                pass
+        return _Path(path).name
+
+    def _read_file(self, path: str) -> Optional[str]:
+        """Read a file via StorageProvider or local filesystem fallback."""
+        if self._storage is not None:
+            return self._storage.read_text(self._storage_key(path))
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return None
+
+    def _write_file(self, path: str, content: str) -> bool:
+        """Write a file via StorageProvider or local filesystem fallback."""
+        if self._storage is not None:
+            return self._storage.save_text(content, self._storage_key(path))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return True
+
+    def _setup_prompt_and_tools(self):
+        """Set up system prompt and tools (called from __init__)."""
         self.system_prompt = """You are a Planning Specialist for ML paper reproduction.
 
 GOAL: REPRODUCE PAPER RESULTS
 You are part of an automated system designed to reproduce the results of a scientific paper. Your individual tasks must always serve this ultimate goal.
 
 Your job is to create a comprehensive reproduction_checklist.md that guides all subsequent agents.
+
+⚠️  CRITICAL BOUNDARY RULE ⚠️
+You MUST ONLY access files INSIDE the repository directory provided in the prompt.
+NEVER use relative paths like "../" to navigate outside it.
+NEVER access the parent directory or any sibling directories.
+
+WEB SEARCH is allowed ONLY for:
+  - Looking up the correct Python version when not specified in the repo
+  - Nothing else — specifically do NOT search for datasets or commands
+
+If a dataset is NOT found in the repo: write "NEEDS_DISCOVERY" in the checklist.
+The data_prep agent will discover the download method via web search.
+
+═══════════════════════════════════════════════════════════════
+SEARCH BUDGET — READ THIS BEFORE STARTING
+═══════════════════════════════════════════════════════════════
+You have a LIMITED number of steps. Use them efficiently:
+
+MANDATORY (always do these first):
+  1. list root directory
+  2. read README.md
+  3. scan key subdirectories (scripts/, data/, configs/) — list only, don't read files unless needed
+
+ALLOWED (only if the above leave gaps):
+  - grep for specific keywords — max 2 times per keyword
+  - read at most 3-4 specific files that look relevant based on directory listing
+
+STOP AND WRITE THE CHECKLIST when ANY of the following is true:
+  - You have found all commands and dataset sources
+  - You have already done 2+ targeted searches for a dataset/command and found nothing
+  - You have read more than 4 files beyond README and still haven't found what you need
+
+NEVER:
+  - Re-read a file you have already read
+  - Run grep more than twice for the same keyword
+  - Read implementation files to "understand the code" — you only need commands
+  - Keep searching hoping the next file will have the answer
+
+When a dataset or command is not found after exhausting README and scripts/:
+write it as NEEDS_DISCOVERY in the checklist and move on.
+The data_prep and execution agents will resolve these gaps.
 
 ═══════════════════════════════════════════════════════════════
 PHASE 1: READ AND ANALYZE
@@ -104,8 +187,7 @@ Create reproduction_checklist.md in the repository root with this structure:
 
 ## Data Preparation
 **Datasets Required:** [list from README]
-**Total Size:** [if mentioned]
-**Download Method:** [script/manual/automatic]
+**Download Source:** [auto / script:[filename] / NEEDS_DISCOVERY]
 **Skip Data Prep:** [YES/NO - YES if scripts auto-download data]
 
 - [ ] Identify all required datasets
@@ -113,6 +195,7 @@ Create reproduction_checklist.md in the repository root with this structure:
 - [ ] Verify data integrity
 
 <!-- NOTE: Set "Skip Data Prep: YES" if README shows data is auto-downloaded by training scripts -->
+<!-- NOTE: Set "Download Source: NEEDS_DISCOVERY" if dataset is mentioned but no download info found in repo -->
 <!-- EXPAND: data_prep_agent will add download commands here -->
 
 ---
@@ -165,15 +248,18 @@ Check if data preparation can be SKIPPED:
 - If README says "data will be downloaded automatically"
 - If there's a `--download` flag that's enabled by default
 
-Set "**Skip Data Prep:** YES" in the checklist if:
+Set "**Skip Data Prep:** YES" and "**Download Source:** auto" if:
 - Scripts handle data download automatically
-- Data is fetched on first run
-- Using standard datasets (CIFAR, MNIST, ImageNet from torchvision)
+- Data is fetched on first run from a standard library loader
 
-Set "**Skip Data Prep:** NO" if:
-- Manual download is required
-- Data must be downloaded from external URLs
-- Preprocessing scripts must be run first
+Set "**Skip Data Prep:** NO" and "**Download Source:** script:[filename]" if:
+- A download script exists in the repo
+- Manual download via wget/curl is documented
+
+Set "**Skip Data Prep:** NO" and "**Download Source:** NEEDS_DISCOVERY" if:
+- A dataset is mentioned in the paper/README but NO download instructions exist in the repo
+- Do NOT keep searching — write NEEDS_DISCOVERY and move on
+- The data_prep agent will discover the download method automatically
 
 After creating the checklist, respond with a summary of what you found.
 
@@ -208,16 +294,23 @@ Be specific in the instructions — tell the user exactly where to go and what t
 If no user input is required, do NOT add this section.
 """
 
-        # Minimal tools for planning - mostly reading
+        # Wrap DuckDuckGo so network failures return an error string instead of crashing the agent
+        _ddg = DuckDuckGoSearchRun()
+        _ddg.handle_tool_error = True
+
+        # Tools for planning: file reading + writing + grep for repo search + web search as last resort
         self.tools = [
             read_file,
+            write_file,
             list_directory,
-            DuckDuckGoSearchRun(),
+            grep_in_directory,
+            find_files,
+            _ddg,
         ]
 
         print("\n" + "=" * 60)
         print("Planning Agent Initialized")
-        print(f"   Max Iterations: {max_iterations}")
+        print(f"   Max Iterations: {self.max_iterations}")
         print("=" * 60)
 
     def create_plan(self, state: Dict) -> Dict:
@@ -328,6 +421,9 @@ Repository Path: {code_path}
 Paper Title: {paper_title}
 Repository URL: {repo_url}
 
+⚠️  BOUNDARY: Only access files inside {code_path}. Never use "../" or go above this directory.
+If something is not found inside {code_path}, write "not found in repo" — do NOT explore parent or sibling directories.
+
 Paper Context (from analyzer):
 {paper_context[:2000] if paper_context else "Not available"}
 
@@ -336,7 +432,7 @@ Paper Context (from analyzer):
 ====================================
 
 STEPS:
-1. First, list the directory to see the structure
+1. First, list the directory {code_path} to see the structure
 2. Read README.md thoroughly
 3. Look for nested READMEs in subdirectories
 4. Identify environment files and requirements
@@ -422,17 +518,28 @@ Start by listing the repository contents."""
                     lazy=True,
                 )
 
-            # Ensure checklist was created
+            # Ensure checklist was created and is complete
             checklist_path = os.path.join(code_path, "reproduction_checklist.md")
+            should_skip_data_prep = not plan.get("requires_data_prep", False)
             if not os.path.exists(checklist_path):
-                # Create a basic checklist if agent didn't
-                # Skip data prep by default (reactive mode) unless explicitly required
-                should_skip_data_prep = not plan.get("requires_data_prep", False)
+                # File was never written — create basic checklist
                 self._create_basic_checklist(
                     checklist_path, paper_title, repo_url,
                     experiment_mode, selected_experiments,
                     skip_data_prep=should_skip_data_prep
                 )
+            else:
+                # File exists — validate it has all required sections (LLM may have written partial content)
+                content = self._read_file(checklist_path) or ""
+                required_sections = ["## Environment Setup", "## Data Preparation", "## Experiments"]
+                missing = [s for s in required_sections if s.lower() not in content.lower()]
+                if missing:
+                    print(f"   ⚠️  Checklist incomplete (missing: {missing}), replacing with basic template")
+                    self._create_basic_checklist(
+                        checklist_path, paper_title, repo_url,
+                        experiment_mode, selected_experiments,
+                        skip_data_prep=should_skip_data_prep
+                    )
 
             # Detect user input requirements from checklist
             user_input_req = self._detect_user_input_requirements(checklist_path)
@@ -511,11 +618,9 @@ Start by listing the repository contents."""
         print(f"   Reason: {reason}")
 
         # Read current checklist
-        try:
-            with open(checklist_path, "r", encoding="utf-8") as f:
-                current_checklist = f.read()
-        except Exception as e:
-            print(f"⚠️  Could not read checklist: {e}")
+        current_checklist = self._read_file(checklist_path)
+        if current_checklist is None:
+            print(f"⚠️  Could not read checklist: {checklist_path}")
             return state
 
         # Determine what section to update
@@ -543,9 +648,7 @@ Preserve the existing structure and add the new items.
             updated_content = response.content
 
             # Write updated checklist
-            with open(checklist_path, "w", encoding="utf-8") as f:
-                f.write(updated_content)
-
+            self._write_file(checklist_path, updated_content)
             print(f"✅ Checklist updated with new {update_section} information")
 
         except Exception as e:
@@ -580,10 +683,11 @@ Preserve the existing structure and add the new items.
 
         # Try to read checklist to extract skip_data_prep flag
         checklist_path = os.path.join(code_path, "reproduction_checklist.md")
-        if os.path.exists(checklist_path):
+        if os.path.exists(checklist_path) or self._storage is not None:
             try:
-                with open(checklist_path, "r", encoding="utf-8") as f:
-                    content = f.read()
+                content = self._read_file(checklist_path)
+                if content is None:
+                    content = ""
                 # Look for Skip Data Prep flag
                 if "**Skip Data Prep:** YES" in content or "Skip Data Prep: YES" in content:
                     plan["skip_data_prep"] = True
@@ -643,13 +747,8 @@ Preserve the existing structure and add the new items.
         """
         import re
 
-        if not os.path.exists(checklist_path):
-            return None
-
-        try:
-            with open(checklist_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
+        content = self._read_file(checklist_path)
+        if content is None:
             return None
 
         # Look for the User Input Required section
@@ -851,9 +950,7 @@ Preserve the existing structure and add the new items.
 """
 
         try:
-            os.makedirs(os.path.dirname(checklist_path), exist_ok=True)
-            with open(checklist_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            self._write_file(checklist_path, content)
             print(f"📝 Created basic checklist at {checklist_path}")
         except Exception as e:
             print(f"⚠️  Could not create checklist: {e}")
@@ -948,11 +1045,7 @@ Preserve the existing structure and add the new items.
         Returns:
             Checklist content or None if not found
         """
-        try:
-            with open(checklist_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception:
-            return None
+        return self._read_file(checklist_path)
 
     def update_checklist_item(
         self, checklist_path: str, item: str, completed: bool = True
@@ -968,8 +1061,9 @@ Preserve the existing structure and add the new items.
             True if item was found and updated
         """
         try:
-            with open(checklist_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = self._read_file(checklist_path)
+            if content is None:
+                return False
 
             # Find and replace the checkbox
             old_marker = "- [ ]" if not completed else "- [x]"
@@ -984,10 +1078,7 @@ Preserve the existing structure and add the new items.
                         break
 
                 content = "\n".join(lines)
-
-                with open(checklist_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-
+                self._write_file(checklist_path, content)
                 return True
 
             return False

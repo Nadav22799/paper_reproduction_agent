@@ -95,8 +95,10 @@ Thumbs.db
 .env.local
 .env.*.local
 *.key
+*.json.key
 secrets/
 credentials/
+gcp-credentials.json
 
 # ============================================================================
 # Testing and Coverage
