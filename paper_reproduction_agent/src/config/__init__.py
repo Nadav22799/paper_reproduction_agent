@@ -41,6 +41,31 @@ class ReproductionConfig(BaseModel):
         default_factory=lambda: float(os.getenv("llm_output_cost_per_million", "15.00"))
     )
 
+    # ============================================
+    # Storage Backend Configuration
+    # ============================================
+
+    # Storage backend: "local", "gcs", or "s3"
+    storage_backend: str = Field(
+        default_factory=lambda: os.getenv("STORAGE_BACKEND", "local")
+    )
+
+    # GCS configuration
+    gcp_project_id: str = Field(
+        default_factory=lambda: os.getenv("GCP_PROJECT_ID", "")
+    )
+    gcp_bucket_name: str = Field(
+        default_factory=lambda: os.getenv("GCP_BUCKET_NAME", "")
+    )
+
+    # S3 configuration
+    aws_s3_bucket: str = Field(
+        default_factory=lambda: os.getenv("AWS_S3_BUCKET", "")
+    )
+    aws_s3_prefix: str = Field(
+        default_factory=lambda: os.getenv("AWS_S3_PREFIX", "paper-reproduction")
+    )
+
     # Verbose reasoning output - shows agent reasoning during execution
     show_reasoning: bool = Field(
         default_factory=lambda: os.getenv("SHOW_REASONING", "false").lower() == "true"

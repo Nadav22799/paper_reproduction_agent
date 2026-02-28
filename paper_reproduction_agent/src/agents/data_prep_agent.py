@@ -12,6 +12,7 @@ import os
 from typing import Dict
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
+from langchain_community.tools import DuckDuckGoSearchRun
 from ..tools.code_execution_tools import (
     read_file,
     list_directory,
@@ -54,12 +55,17 @@ class DataPrepAgent:
         from ..config.prompts import DATA_PREP_AGENT_PROMPT
         self.system_prompt = DATA_PREP_AGENT_PROMPT
 
+        # Wrap DuckDuckGo so network failures return an error string instead of crashing
+        _ddg = DuckDuckGoSearchRun()
+        _ddg.handle_tool_error = True
+
         self.tools = [
             read_file,
             list_directory,
             guard_tool(execute_shell_command, mode=critic_mode),
             guard_tool(execute_python_code, mode=critic_mode),
             search_error_solution,
+            _ddg,  # for NEEDS_DISCOVERY dataset lookup
         ]
 
         print("\n" + "=" * 60)

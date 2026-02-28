@@ -189,7 +189,7 @@ class HierarchicalContextManager:
                     name=self._collection_name, metadata={"hnsw:space": "cosine"}
                 )
                 logger.info(f"ChromaDB collection initialized: {self._collection_name}")
-            except ImportError:
+            except (ImportError, RuntimeError):
                 logger.warning("chromadb not available, warm storage disabled")
                 self._collection = False  # Mark as unavailable
         return self._collection if self._collection else None

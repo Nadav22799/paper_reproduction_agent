@@ -46,12 +46,13 @@ class CriticAgent:
         "create_python_file",
     ]
 
-    def __init__(self, metrics_tracker=None, enable_llm_critic: bool = False, callbacks=None):
+    def __init__(self, metrics_tracker=None, enable_llm_critic: bool = False, callbacks=None, storage=None):
         """Initialize the Critic Agent.
 
         Args:
             metrics_tracker: Optional metrics tracker for observability
             enable_llm_critic: Whether to use LLM for deep inspection
+            storage: Optional StorageProvider for persisting critic inspection logs
         """
         self.metrics_tracker = metrics_tracker
         self.blocked_count = 0
@@ -60,6 +61,7 @@ class CriticAgent:
         self.enable_llm_critic = enable_llm_critic
         self.callbacks = callbacks or []
         self._llm = None  # Lazy init
+        self._storage = storage
 
     def _get_llm(self):
         """Lazy initialize cheap LLM for deep inspection."""
@@ -513,14 +515,24 @@ Respond with ONLY one of:
         }
 
         # Append to JSONL file for training data collection
-        # Ensure log dir exists
         log_dir = self.metrics_tracker.log_dir if hasattr(self.metrics_tracker, 'log_dir') else "logs"
         os.makedirs(log_dir, exist_ok=True)
-        
         log_file = os.path.join(log_dir, "critic_inspections.jsonl")
+        new_line = json.dumps(entry) + "\n"
         try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
+            if self._storage is not None:
+                from src.utils.storage import LocalStorageProvider
+                if isinstance(self._storage, LocalStorageProvider):
+                    # Local: simple append
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(new_line)
+                else:
+                    # Cloud: read-modify-write (critic writes are infrequent)
+                    existing = self._storage.read_text("logs/critic_inspections.jsonl") or ""
+                    self._storage.save_text(existing + new_line, "logs/critic_inspections.jsonl")
+            else:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(new_line)
         except Exception:
             # Ignore logging errors to not break execution
             pass

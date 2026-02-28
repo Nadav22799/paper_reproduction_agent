@@ -1,0 +1,62 @@
+services:
+
+  # ── Agent (CLI / background worker) ─────────────────────────────────────────
+  agent:
+    build:
+      context: ./paper_reproduction_agent
+      dockerfile: Dockerfile
+    env_file:
+      - ./paper_reproduction_agent/.env
+    volumes:
+      # Persist agent working data between runs
+      - agent_cloned_repo:/app/cloned_repo
+      - agent_downloads:/app/downloads
+      - agent_logs:/app/logs
+      - agent_checkpoints:/app/checkpoints
+    # The agent container is a CLI tool — no ports exposed.
+    # Use: docker compose run agent python -m src.cli reproduce <paper_id>
+    stdin_open: true
+    tty: true
+
+  # ── Web Backend (FastAPI) ────────────────────────────────────────────────────
+  web-backend:
+    build:
+      context: ./paper_reproduction_web/backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./paper_reproduction_agent/.env
+    environment:
+      # Allow frontend container to call the API
+      CORS_ORIGIN: "http://localhost:3000"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Share agent runtime data (read-write so backend can manage runs)
+      - agent_cloned_repo:/app/cloned_repo
+      - agent_downloads:/app/downloads
+      - agent_logs:/app/logs:ro
+      - agent_checkpoints:/app/checkpoints
+      # Mount agent source so backend can import from it
+      - ./paper_reproduction_agent:/agent:ro
+    depends_on:
+      - agent
+
+  # ── Web Frontend (Next.js) ───────────────────────────────────────────────────
+  web-frontend:
+    build:
+      context: ./paper_reproduction_web/frontend
+      dockerfile: Dockerfile
+    environment:
+      # Point Next.js proxy and WS at the backend service
+      NEXT_PUBLIC_API_URL: "http://web-backend:8000"
+      NEXT_PUBLIC_WS_URL: "ws://web-backend:8000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - web-backend
+
+volumes:
+  agent_cloned_repo:
+  agent_downloads:
+  agent_logs:
+  agent_checkpoints:

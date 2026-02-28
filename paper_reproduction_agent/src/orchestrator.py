@@ -19,6 +19,7 @@ import shutil
 from .utils.checkpoint_manager import ExperimentCheckpoint
 from .utils.hierarchical_context import HierarchicalContextManager
 from .utils.metrics_tracker import MetricsTracker
+from .utils.storage import StorageManager
 
 
 def remove_readonly(func, path, _):
@@ -155,6 +156,7 @@ class PaperReproductionOrchestrator:
         enable_logging=True,
         enable_checkpoints=True,
         use_supervisor: bool = None,
+        base_dir=None,
     ):
         """Initialize the orchestrator.
 
@@ -177,7 +179,17 @@ class PaperReproductionOrchestrator:
         # Create a specialized "Reasoning LLM" with chain-of-thought enabled (if supported)
         # This is used for complex agents like Supervisor and Planner
         self.reasoning_llm = create_llm(temperature=0.3, include_thoughts=True)
-        self.config = ReproductionConfig()
+        self.config = ReproductionConfig(base_dir=base_dir) if base_dir else ReproductionConfig()
+
+        # Initialize storage provider (reads STORAGE_BACKEND env var: local/gcs/s3)
+        self.storage = StorageManager.get_provider(base_dir=str(self.config.base_dir))
+        print(f"💾 Storage backend: {os.getenv('STORAGE_BACKEND', 'local').upper()}")
+
+        # Initialize SQLite experiment tracking
+        from .utils.experiment_db import ExperimentDB
+        db_path = str(self.config.base_dir / "experiments.db")
+        self.experiment_db = ExperimentDB(db_path=db_path)
+        print("📋 Experiment DB initialized")
 
         # Determine which architecture to use
         if use_supervisor is None:
@@ -205,7 +217,7 @@ class PaperReproductionOrchestrator:
         self.logging_callback = None
         
         if enable_logging:
-            self.file_logger = FileLogger(log_dir=self.config.logs_path)
+            self.file_logger = FileLogger(log_dir=self.config.logs_path, storage=self.storage)
             
         # Always create callback for metrics tracking and stdout logging
         # (CLI captures stdout via TeeOutput, so we want verbose=True)
@@ -220,7 +232,10 @@ class PaperReproductionOrchestrator:
         self.checkpoint_manager = None
         if enable_checkpoints:
             self.checkpoint_manager = ExperimentCheckpoint(
-                checkpoint_dir=self.config.checkpoints_path
+                checkpoint_dir=self.config.checkpoints_path,
+                # No storage= injected: ExperimentCheckpoint creates its own
+                # LocalStorageProvider anchored at checkpoints_path, avoiding
+                # the StorageManager singleton (which is anchored at base_dir).
             )
             print("💾 Checkpoint system enabled")
 
@@ -299,11 +314,14 @@ class PaperReproductionOrchestrator:
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
+            storage=self.storage,
+            base_dir=str(self.config.base_dir),
         )
         self.critic_agent = CriticAgent(
             metrics_tracker=self.metrics_tracker,
             enable_llm_critic=self.config.enable_llm_critic,
             callbacks=[self.logging_callback] if self.logging_callback else [],
+            storage=self.storage,
         )
         self.data_prep_agent = DataPrepAgent(
             self.reasoning_llm,
@@ -365,6 +383,57 @@ class PaperReproductionOrchestrator:
             self.execution_agent.metrics_tracker = new_tracker
         if hasattr(self, 'validation_agent') and self.validation_agent:
             self.validation_agent.metrics_tracker = new_tracker
+
+    # ------------------------------------------------------------------
+    # Experiment tracking helpers (called by CLI and RunManager)
+    # ------------------------------------------------------------------
+
+    def start_run_tracking(
+        self,
+        paper_id: str,
+        config: dict,
+        llm_provider: Optional[str] = None,
+        critic_mode: Optional[str] = None,
+    ) -> str:
+        """Create a DB record for this run and return the run_id.
+
+        Call this BEFORE invoking the workflow so that run status is
+        visible immediately.
+        """
+        run_id = self.experiment_db.create_run(
+            paper_id=paper_id,
+            config=config,
+            llm_provider=llm_provider or os.getenv("LLM_PROVIDER", "gemini"),
+            critic_mode=critic_mode or self.config.critic_mode,
+        )
+        self._current_run_id = run_id
+        return run_id
+
+    def finalize_run_tracking(self, run_id: str, result_state: dict) -> None:
+        """Update DB with final metrics after the workflow completes."""
+        try:
+            stats = self.metrics_tracker.get_all_stats()
+            phases = result_state.get("completed_phases", [])
+
+            self.experiment_db.update_metrics(
+                run_id=run_id,
+                metrics_json=str(stats),
+                total_cost=stats.get("estimated_cost", 0.0),
+                total_tokens=(
+                    stats.get("total_tokens_input", 0)
+                    + stats.get("total_tokens_output", 0)
+                ),
+                duration=stats.get("total_duration", 0.0),
+                accuracy=None,  # Filled in by validation phase if available
+                phases=phases,
+                paper_title=result_state.get("paper_title"),
+                cloned_repo_path=result_state.get("implementation_path"),
+            )
+            final_status = result_state.get("final_status", "")
+            db_status = "completed" if not final_status.lower().startswith("fail") else "failed"
+            self.experiment_db.update_status(run_id, db_status)
+        except Exception as e:
+            print(f"⚠️  Could not finalize experiment tracking: {e}")
 
     def _build_workflow(self) -> StateGraph:
         """Build the LangGraph workflow based on architecture setting."""
@@ -1297,7 +1366,6 @@ class PaperReproductionOrchestrator:
         self.metrics_tracker.start_phase("decide_and_clone")
         print("🤔 Deciding on implementation path...")
 
-        # FIRST: Check if repo already exists on disk (fallback for when APIs fail)
         code_path = self.config.repo_path
         repo_marker = os.path.join(code_path, ".repo_url")
 

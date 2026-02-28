@@ -28,6 +28,8 @@ MagicMock/
 verify_check.txt
 downloads/
 examples/
+experiments.db
+checkpoints/
 
 # IDE
 .vscode/
@@ -45,6 +47,10 @@ lib/
 include/
 share/
 
+
+# Credentials (never commit GCP/AWS keys)
+credentials/
+*.json.key
 
 # Safety
 node_modules/
