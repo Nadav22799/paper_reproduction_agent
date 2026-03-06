@@ -135,7 +135,6 @@ def _determine_tier(resources: Dict) -> str:
 def get_resource_summary(resources: Dict) -> str:
     """Generate human-readable resource summary."""
     lines = []
-    lines.append("💻 System Resources Detected:")
     lines.append(f"   GPU: {'Yes' if resources['gpu_available'] else 'No'}")
 
     if resources["gpu_available"]:

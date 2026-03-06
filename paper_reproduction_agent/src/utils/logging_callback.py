@@ -3,6 +3,12 @@
 from langchain_core.callbacks import BaseCallbackHandler
 from typing import Any, Dict, List
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from rich.markdown import Markdown
+
+console = Console()
 
 class LoggingCallbackHandler(BaseCallbackHandler):
     """Callback handler that logs LLM responses and optionally tracks metrics."""
@@ -15,12 +21,15 @@ class LoggingCallbackHandler(BaseCallbackHandler):
             metrics_tracker  # Optional MetricsTracker for token tracking
         )
 
-    def _log(self, message: str):
+    def _log(self, message: str, rich_renderable=None):
         """Log to both console and file if file_logger is set."""
         if self.file_logger:
             self.file_logger.log(message)
+        
+        if rich_renderable:
+            console.print(rich_renderable)
         else:
-            print(message, end="")
+            console.print(message, end="")
 
     def on_llm_start(
         self, serialized: Dict[str, Any], prompts: List[str], **kwargs
@@ -28,15 +37,27 @@ class LoggingCallbackHandler(BaseCallbackHandler):
         """Run when LLM starts."""
         self.iteration += 1
         if self.verbose:
-            self._log(f"\n{'='*60}\n")
-            self._log(f"🤖 Iteration {self.iteration}: Calling LLM...\n")
-            self._log(f"{'='*60}\n")
-            # Log the prompts
-            for i, prompt in enumerate(prompts):
-                self._log(f"\n📝 Prompt {i+1}:\n")
-                self._log(f"{prompt[:1000]}\n")
-                if len(prompt) > 1000:
-                    self._log(f"... (truncated, total length: {len(prompt)} chars)\n")
+            # Try to identify which agent/component is calling the LLM
+            caller = "Agent"
+            metadata = kwargs.get("metadata", {})
+
+            # checkpoint_ns looks like "planning:uuid|agent:uuid" — first segment is the real agent name
+            checkpoint_ns = metadata.get("checkpoint_ns", "")
+            if checkpoint_ns:
+                caller = checkpoint_ns.split(":")[0].replace("_", " ").title()
+            elif "langgraph_node" in metadata:
+                caller = metadata["langgraph_node"].replace("_", " ").title()
+
+            msg = f"🤖 Iteration {self.iteration}: {caller} thinking..."
+            
+            self._log(f"\n{'='*60}\n{msg}\n{'='*60}\n",
+                      rich_renderable=Panel(msg, border_style="cyan"))
+            
+            # Log the prompts (Disabled per user feedback requesting a cleaner CLI)
+            # for i, prompt in enumerate(prompts):
+            #     self._log(f"\n📝 Prompt {i+1}:\n{prompt[:1000]}\n")
+            #     if len(prompt) > 1000:
+            #         self._log(f"... (truncated, total length: {len(prompt)} chars)\n")
 
     def on_llm_end(self, response, **kwargs) -> None:
         """Run when LLM ends."""
@@ -87,7 +108,8 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                         thoughts = gi.get("thoughts") or gi.get("reasoning")
                         
                     if thoughts:
-                        self._log(f"\n💭 Reasoning:\n{thoughts}\n")
+                        self._log(f"\n💭 Reasoning:\n{thoughts}\n",
+                                  rich_renderable=Panel(Markdown(thoughts), title="💭 Reasoning", border_style="magenta"))
                         break
                 if thoughts:
                     break
@@ -96,7 +118,8 @@ class LoggingCallbackHandler(BaseCallbackHandler):
         if not thoughts and hasattr(response, "llm_output") and response.llm_output:
              if "thoughts" in response.llm_output:
                 thoughts = response.llm_output['thoughts']
-                self._log(f"\n💭 Reasoning (LLM Output):\n{thoughts}\n")
+                self._log(f"\n💭 Reasoning (LLM Output):\n{thoughts}\n",
+                          rich_renderable=Panel(Markdown(thoughts), title="💭 Reasoning (LLM Output)", border_style="magenta"))
 
         # Track token usage if metrics_tracker is provided
         # IMPORTANT: Record tokens only ONCE - LangChain often puts the same data
@@ -160,7 +183,6 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                                     else str(message)
                                 )
 
-                            # Debug: Check for tool calls
                             if hasattr(message, "tool_calls") and message.tool_calls:
                                 self._log(
                                     f"\n🔧 Tool Calls Found: {len(message.tool_calls)}\n"
@@ -174,7 +196,18 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                                         else:
                                             name = getattr(tc, "name", "unknown")
                                             args = getattr(tc, "args", {})
-                                        self._log(f"   - {name}: {args}\n")
+                                        
+                                        msg = f"   - {name}: {args}\n"
+                                        self._log(msg, rich_renderable=Panel(
+                                            Text.assemble(
+                                                ("Tool: ", "bold magenta"),
+                                                (str(name), "italic cyan"),
+                                                ("\nArgs: ", "bold green"),
+                                                (str(args), "white")
+                                            ),
+                                            title="External Action",
+                                            border_style="green"
+                                        ))
                                     except Exception as e:
                                         self._log(f"   - {tc} (error logging: {e})\n")
                             elif hasattr(
@@ -185,13 +218,13 @@ class LoggingCallbackHandler(BaseCallbackHandler):
                                     f"\n🔧 Tool Calls Found (additional_kwargs): {len(tool_calls)}\n"
                                 )
                                 for tc in tool_calls:
-                                    self._log(f"   - {tc}\n")
+                                    self._log(f"   - {tc}\n", rich_renderable=Panel(str(tc), title="External Action", border_style="green"))
                             
                             # Reasoning is already logged at the top, no need to duplicate here.
                             # We just log the text response itself now.
 
                             self._log("\n💬 LLM Response:\n")
-                            self._log(f"{text}\n")  # Log full response, not truncated
+                            self._log(f"{text}\n", rich_renderable=Panel(Markdown(text), title="💬 LLM Response", border_style="blue"))  # Log full response, not truncated
                             self._log(f"\n(Response length: {len(text)} chars)\n")
 
     def _record_usage_from_dict(self, usage: dict) -> bool:
@@ -246,8 +279,8 @@ class LoggingCallbackHandler(BaseCallbackHandler):
     def on_llm_error(self, error: Exception, **kwargs) -> None:
         """Run when LLM errors."""
         if self.verbose:
-            self._log(f"\n❌ LLM Error: {error}\n")
-            self._log("   This might be a rate limit or API error.\n")
+            self._log(f"\n❌ LLM Error: {error}\n   This might be a rate limit or API error.\n",
+                      rich_renderable=Panel(f"❌ LLM Error: {error}\nThis might be a rate limit or API error.", border_style="red"))
 
     def on_tool_start(
         self, serialized: Dict[str, Any], input_str: str, **kwargs
@@ -255,15 +288,15 @@ class LoggingCallbackHandler(BaseCallbackHandler):
         """Run when tool starts."""
         if self.verbose:
             tool_name = serialized.get("name", "unknown")
-            self._log(f"\n🔧 Calling tool: {tool_name}\n")
-            self._log(f"   Input: {input_str[:200]}\n")
+            self._log(f"\n🔧 Calling tool: {tool_name}\n   Input: {input_str[:200]}\n",
+                      rich_renderable=Panel(f"🔧 Calling tool: {tool_name}\nInput: {input_str[:200]}", border_style="yellow"))
 
     def on_tool_end(self, output: str, **kwargs) -> None:
         """Run when tool ends."""
         if self.verbose:
-            self._log(f"   ✅ Tool output: {str(output)[:300]}\n")
+            self._log(f"   ✅ Tool output: {str(output)[:300]}\n", rich_renderable=Text(f"✅ Tool output: {str(output)[:300]}", style="dim"))
 
     def on_tool_error(self, error: Exception, **kwargs) -> None:
         """Run when tool errors."""
         if self.verbose:
-            self._log(f"   ❌ Tool error: {error}\n")
+            self._log(f"   ❌ Tool error: {error}\n", rich_renderable=Text(f"❌ Tool error: {error}", style="bold red"))

@@ -61,8 +61,8 @@ class ExecutionAgent:
         self.resources = detect_system_resources()
         self.experiment_strategy = get_experiment_strategy(self.resources)
 
-        from ..config.prompts import EXECUTION_AGENT_PROMPT
-        self.system_prompt = EXECUTION_AGENT_PROMPT
+        from ..config.prompts import EXECUTION_AGENT_PROMPT, EFFICIENCY_RULES
+        self.system_prompt = EXECUTION_AGENT_PROMPT.replace("{efficiency_rules}", EFFICIENCY_RULES)
 
         self.tools = [
             read_file,
@@ -76,11 +76,9 @@ class ExecutionAgent:
             search_error_solution,
         ]
 
-        print("\n" + "=" * 60)
-        print("Execution Agent Initialized")
-        print(f"   Max Iterations: {max_iterations}")
-        print(f"   Strategy: {self.experiment_strategy}")
-        print("=" * 60)
+        from rich.console import Console
+        from rich.panel import Panel
+        Console().print(Panel(f"Max Iterations: {max_iterations}\nStrategy: {self.experiment_strategy}", title="Execution Agent Initialized", border_style="cyan", expand=False))
 
     def run_experiments(self, state: Dict) -> Dict:
         """Run experiments from the checklist.

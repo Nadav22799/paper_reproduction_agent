@@ -514,9 +514,6 @@ class DiscoveryAgent:
         repo_metadata: list = None,
     ) -> str:
         """Use LLM to select the best repository for the paper."""
-        if len(repos) == 1:
-            return repos[0]
-
         if not self.llm:
             return self._heuristic_select_repo(repos, paper_title, repo_metadata)
 
@@ -562,6 +559,7 @@ IMPORTANT CRITERIA:
 4. AVOID general libraries (transformers, pytorch_geometric, etc.) unless the paper is ABOUT that library
 5. Prefer repos from paper authors (if identifiable from repo name/paper title match)
 6. High star count combined with matching name is a strong signal
+7. URLs may have been extracted from paper text and may contain trailing punctuation (period, comma, etc.) — mentally strip it when evaluating.
 
 Reply with ONLY the number (1, 2, 3, etc.) of the best repository.
 
@@ -594,8 +592,9 @@ Answer (number only):"""
             if selected_idx is not None:
                 idx = selected_idx - 1  # Convert to 0-indexed
                 if 0 <= idx < len(repos):
-                    print(f"🤖 LLM selected repo #{selected_idx}: {repos[idx]}")
-                    return repos[idx]
+                    clean_url = repos[idx].rstrip(".,;:!?)'\"").strip()
+                    print(f"🤖 LLM selected repo #{selected_idx}: {clean_url}")
+                    return clean_url
                 else:
                     print(
                         f"⚠️  LLM returned invalid index {selected_idx} (out of range 1-{len(repos)})"
@@ -625,10 +624,9 @@ Reply with ONLY a single digit (1, 2, 3, etc.). Nothing else."""
                 if selected_idx is not None:
                     idx = selected_idx - 1
                     if 0 <= idx < len(repos):
-                        print(
-                            f"✅ Retry successful, LLM selected repo #{selected_idx}: {repos[idx]}"
-                        )
-                        return repos[idx]
+                        clean_url = repos[idx].rstrip(".,;:!?)'\"").strip()
+                        print(f"✅ Retry successful, LLM selected repo #{selected_idx}: {clean_url}")
+                        return clean_url
                     else:
                         print(f"⚠️  Retry returned invalid index {selected_idx}")
                 else:
@@ -768,5 +766,6 @@ Reply with ONLY a single digit (1, 2, 3, etc.). Nothing else."""
         print(
             f"   Top scores: {', '.join(f'{name}={s}' for name, s in scores_debug[:3])}"
         )
+        best_repo = best_repo.rstrip(".,;:!?)'\"").strip()
         print(f"🔍 Heuristic selected: {best_repo} (score: {best_score})")
         return best_repo

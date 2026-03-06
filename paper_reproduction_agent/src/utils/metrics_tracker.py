@@ -80,10 +80,22 @@ class WorkflowMetrics:
     total_cache_creation_tokens: int = 0
     total_cache_read_tokens: int = 0
 
+    # Per-tier token tracking (strong = complex agents, weak = simple agents)
+    strong_tokens_input: int = 0
+    strong_tokens_output: int = 0
+    weak_tokens_input: int = 0
+    weak_tokens_output: int = 0
+
     # Cost rates (per 1M tokens) - configurable
-    input_cost_per_million: float = 3.00  # Default: GPT-4 Turbo input
-    output_cost_per_million: float = 15.00  # Default: GPT-4 Turbo output
+    input_cost_per_million: float = 3.00  # Default/fallback rate
+    output_cost_per_million: float = 15.00  # Default/fallback rate
     embedding_cost_per_million: float = 0.10  # Default: OpenAI ada-002
+
+    # Per-tier cost rates (0.0 means "not configured, use fallback")
+    strong_input_cost_per_million: float = 0.0
+    strong_output_cost_per_million: float = 0.0
+    weak_input_cost_per_million: float = 0.0
+    weak_output_cost_per_million: float = 0.0
 
     def to_dict(self) -> dict:
         """Serialize workflow metrics to dictionary for checkpoint saving."""
@@ -98,9 +110,17 @@ class WorkflowMetrics:
             "total_reasoning_tokens": self.total_reasoning_tokens,
             "total_cache_creation_tokens": self.total_cache_creation_tokens,
             "total_cache_read_tokens": self.total_cache_read_tokens,
+            "strong_tokens_input": self.strong_tokens_input,
+            "strong_tokens_output": self.strong_tokens_output,
+            "weak_tokens_input": self.weak_tokens_input,
+            "weak_tokens_output": self.weak_tokens_output,
             "input_cost_per_million": self.input_cost_per_million,
             "output_cost_per_million": self.output_cost_per_million,
             "embedding_cost_per_million": self.embedding_cost_per_million,
+            "strong_input_cost_per_million": self.strong_input_cost_per_million,
+            "strong_output_cost_per_million": self.strong_output_cost_per_million,
+            "weak_input_cost_per_million": self.weak_input_cost_per_million,
+            "weak_output_cost_per_million": self.weak_output_cost_per_million,
         }
 
     @classmethod
@@ -120,6 +140,14 @@ class WorkflowMetrics:
         workflow.total_reasoning_tokens = data.get("total_reasoning_tokens", 0)
         workflow.total_cache_creation_tokens = data.get("total_cache_creation_tokens", 0)
         workflow.total_cache_read_tokens = data.get("total_cache_read_tokens", 0)
+        workflow.strong_tokens_input = data.get("strong_tokens_input", 0)
+        workflow.strong_tokens_output = data.get("strong_tokens_output", 0)
+        workflow.weak_tokens_input = data.get("weak_tokens_input", 0)
+        workflow.weak_tokens_output = data.get("weak_tokens_output", 0)
+        workflow.strong_input_cost_per_million = data.get("strong_input_cost_per_million", 0.0)
+        workflow.strong_output_cost_per_million = data.get("strong_output_cost_per_million", 0.0)
+        workflow.weak_input_cost_per_million = data.get("weak_input_cost_per_million", 0.0)
+        workflow.weak_output_cost_per_million = data.get("weak_output_cost_per_million", 0.0)
 
         # Restore phases
         for name, phase_data in data.get("phases", {}).items():
@@ -150,6 +178,7 @@ class MetricsTracker:
         "data_prep",
         "execution",
         "validation",
+        "generalization",
         "generate_report",
     ]
 
@@ -181,17 +210,33 @@ class MetricsTracker:
         if embedding_cost_per_million == 0.10:  # Default value check
             embedding_cost_per_million = float(os.getenv("EMBEDDING_COST_PER_M", "0.10"))
 
+        # Load per-tier cost rates from env (0.0 = not configured, use fallback)
+        strong_input_cost = float(os.getenv("LLM_STRONG_INPUT_COST_PER_M", "0.0"))
+        strong_output_cost = float(os.getenv("LLM_STRONG_OUTPUT_COST_PER_M", "0.0"))
+        weak_input_cost = float(os.getenv("LLM_WEAK_INPUT_COST_PER_M", "0.0"))
+        weak_output_cost = float(os.getenv("LLM_WEAK_OUTPUT_COST_PER_M", "0.0"))
+
         self.metrics = WorkflowMetrics(
             input_cost_per_million=input_cost_per_million,
             output_cost_per_million=output_cost_per_million,
             embedding_cost_per_million=embedding_cost_per_million,
+            strong_input_cost_per_million=strong_input_cost,
+            strong_output_cost_per_million=strong_output_cost,
+            weak_input_cost_per_million=weak_input_cost,
+            weak_output_cost_per_million=weak_output_cost,
         )
         self.enable_live_display = enable_live_display
         self.update_interval = update_interval
         self._stop_display = Event()
         self._display_thread: Optional[Thread] = None
         self._current_phase: Optional[str] = None
-        
+        self._paused: bool = False
+        self._pending_summary: bool = False
+        self._session_start: Optional[float] = None  # start of the current process session
+
+        # Phase-to-tier mapping, set by orchestrator for per-tier cost tracking
+        self.phase_tier_map: Dict[str, str] = {}
+
         # Determine which phases to track
         self.tracked_phases = phases if phases else self.LEGACY_PHASES
 
@@ -206,6 +251,7 @@ class MetricsTracker:
     def start_workflow(self):
         """Mark workflow start and begin live display if enabled."""
         self.metrics.workflow_start = time.time()
+        self._session_start = self.metrics.workflow_start  # same on fresh start
         if self.enable_live_display:
             self._start_live_display()
 
@@ -252,7 +298,7 @@ class MetricsTracker:
     def record_tokens(
         self, input_tokens: int, output_tokens: int, phase_name: Optional[str] = None
     ):
-        """Record token usage."""
+        """Record token usage, auto-routing to correct tier via phase_tier_map."""
         self.metrics.total_llm_tokens_input += input_tokens
         self.metrics.total_llm_tokens_output += output_tokens
 
@@ -260,6 +306,15 @@ class MetricsTracker:
         if phase and phase in self.metrics.phases:
             self.metrics.phases[phase].llm_tokens_input += input_tokens
             self.metrics.phases[phase].llm_tokens_output += output_tokens
+
+        # Route to per-tier counters based on current phase
+        tier = self.phase_tier_map.get(phase) if phase else None
+        if tier == "strong":
+            self.metrics.strong_tokens_input += input_tokens
+            self.metrics.strong_tokens_output += output_tokens
+        elif tier == "weak":
+            self.metrics.weak_tokens_input += input_tokens
+            self.metrics.weak_tokens_output += output_tokens
 
     def record_embedding_tokens(
         self, tokens: int, phase_name: Optional[str] = None
@@ -280,16 +335,51 @@ class MetricsTracker:
         self.metrics.total_cache_creation_tokens += creation
         self.metrics.total_cache_read_tokens += read
 
+    def _has_tier_rates(self) -> bool:
+        """Check if per-tier cost rates are configured."""
+        m = self.metrics
+        return (m.strong_input_cost_per_million > 0 or m.weak_input_cost_per_million > 0)
+
     def estimate_cost(self) -> float:
-        """Estimate total cost from token usage with provider-aware cache pricing."""
+        """Estimate total cost from token usage with provider-aware cache pricing.
+
+        When per-tier cost rates are configured, uses them for tier-tracked tokens.
+        Falls back to single-rate calculation for backward compatibility.
+        """
         import os
 
-        input_cost = (
-            self.metrics.total_llm_tokens_input / 1_000_000
-        ) * self.metrics.input_cost_per_million
-        output_cost = (
-            self.metrics.total_llm_tokens_output / 1_000_000
-        ) * self.metrics.output_cost_per_million
+        if self._has_tier_rates():
+            # Per-tier cost calculation (more accurate with mixed models)
+            m = self.metrics
+            s_in_rate = m.strong_input_cost_per_million or m.input_cost_per_million
+            s_out_rate = m.strong_output_cost_per_million or m.output_cost_per_million
+            w_in_rate = m.weak_input_cost_per_million or m.input_cost_per_million
+            w_out_rate = m.weak_output_cost_per_million or m.output_cost_per_million
+
+            input_cost = (
+                (m.strong_tokens_input / 1_000_000) * s_in_rate
+                + (m.weak_tokens_input / 1_000_000) * w_in_rate
+            )
+            output_cost = (
+                (m.strong_tokens_output / 1_000_000) * s_out_rate
+                + (m.weak_tokens_output / 1_000_000) * w_out_rate
+            )
+
+            # Any tokens not attributed to a tier use fallback rate
+            unattributed_input = m.total_llm_tokens_input - m.strong_tokens_input - m.weak_tokens_input
+            unattributed_output = m.total_llm_tokens_output - m.strong_tokens_output - m.weak_tokens_output
+            if unattributed_input > 0:
+                input_cost += (unattributed_input / 1_000_000) * m.input_cost_per_million
+            if unattributed_output > 0:
+                output_cost += (unattributed_output / 1_000_000) * m.output_cost_per_million
+        else:
+            # Fallback: single-rate calculation (backward compatible)
+            input_cost = (
+                self.metrics.total_llm_tokens_input / 1_000_000
+            ) * self.metrics.input_cost_per_million
+            output_cost = (
+                self.metrics.total_llm_tokens_output / 1_000_000
+            ) * self.metrics.output_cost_per_million
 
         # Embedding cost
         embedding_cost = (
@@ -333,11 +423,26 @@ class MetricsTracker:
         )
 
     def get_total_duration(self) -> float:
-        """Get total workflow duration in seconds."""
+        """Get total workflow duration in seconds (from original workflow start)."""
         if self.metrics.workflow_start is None:
             return 0.0
         end = self.metrics.workflow_end or time.time()
         return end - self.metrics.workflow_start
+
+    def get_session_duration(self) -> float:
+        """Get current session duration in seconds (resets on checkpoint resume)."""
+        if self._session_start is None:
+            return self.get_total_duration()
+        end = self.metrics.workflow_end or time.time()
+        return end - self._session_start
+
+    def _is_resumed(self) -> bool:
+        """True if this session was resumed from a checkpoint."""
+        return (
+            self._session_start is not None
+            and self.metrics.workflow_start is not None
+            and self._session_start > self.metrics.workflow_start + 1  # >1s gap
+        )
 
     def get_total_experiment_time(self) -> float:
         """Get total experiment wait time across all phases."""
@@ -346,6 +451,19 @@ class MetricsTracker:
     def get_total_llm_time(self) -> float:
         """Get estimated LLM/agent time (total - experiment time)."""
         return max(0, self.get_total_duration() - self.get_total_experiment_time())
+
+    def pause_display(self):
+        """Pause live output — call before prompting the user for input."""
+        self._paused = True
+
+    def resume_display(self):
+        """Resume live output — call after user input is collected.
+        Flushes any summary that was buffered while paused.
+        """
+        self._paused = False
+        if self._pending_summary:
+            self._pending_summary = False
+            self._do_print_intermediate_summary()
 
     def _start_live_display(self):
         """Start background thread for live progress updates."""
@@ -359,35 +477,56 @@ class MetricsTracker:
             self._print_live_status()
 
     def _print_live_status(self):
-        """Print current progress status."""
-        elapsed = self.get_total_duration()
+        """Print current progress status (skipped while paused for user input)."""
+        if self._paused:
+            return
         cost = self.estimate_cost()
         total_tokens = (
             self.metrics.total_llm_tokens_input + self.metrics.total_llm_tokens_output
         )
 
-        # Build status line
+        # Show session time; if resumed, also show total time
+        session_elapsed = self.get_session_duration()
+        if self._is_resumed():
+            total_elapsed = self.get_total_duration()
+            time_str = f"+{self._format_duration(session_elapsed)} (total {self._format_duration(total_elapsed)})"
+        else:
+            time_str = self._format_duration(session_elapsed)
+
         status_parts = [
-            f"[{self._format_duration(elapsed)}]",
+            f"[{time_str}]",
             f"Phase: {self._current_phase or 'idle'}",
             f"Est. Cost: ${cost:.4f}",
             f"Tokens: {total_tokens:,}",
         ]
-
-        # Print on new line with distinctive prefix (visible even with interleaved output)
-        status_line = " | ".join(status_parts)
         status_line = " | ".join(status_parts)
         print(f"\n⏱️  PROGRESS: {status_line}", flush=True)
 
     def print_intermediate_summary(self):
-        """Print a brief summary of cost and time so far."""
+        """Print a brief summary of cost and time so far.
+        Buffers the print if display is currently paused for user input.
+        """
         if not self.enable_live_display:
             return
+        if self._paused:
+            self._pending_summary = True
+            return
+        self._do_print_intermediate_summary()
 
-        elapsed = self.get_total_duration()
+    def _do_print_intermediate_summary(self):
+        """Internal: unconditionally print the intermediate summary."""
+        session_elapsed = self.get_session_duration()
         cost = self.estimate_cost()
+        if self._is_resumed():
+            total_elapsed = self.get_total_duration()
+            duration_str = (
+                f"+{self._format_duration(session_elapsed)} this session "
+                f"(total {self._format_duration(total_elapsed)})"
+            )
+        else:
+            duration_str = self._format_duration(session_elapsed)
         print(
-            f"\n💰 Current Metrics: Duration: {self._format_duration(elapsed)} | Cost: ${cost:.4f}\n"
+            f"\n💰 Current Metrics: Duration: {duration_str} | Cost: ${cost:.4f}\n"
         )
 
     def _format_duration(self, seconds: float) -> str:
@@ -450,6 +589,13 @@ class MetricsTracker:
         lines.append("\n--- Cost Estimate ---")
         lines.append(f"  Input Tokens:      {self.metrics.total_llm_tokens_input:>12,}")
         lines.append(f"  Output Tokens:     {self.metrics.total_llm_tokens_output:>12,}")
+
+        # Per-tier breakdown when tier tracking is active
+        m = self.metrics
+        if m.strong_tokens_input or m.weak_tokens_input:
+            lines.append(f"    Strong (in/out): {m.strong_tokens_input:>10,} / {m.strong_tokens_output:>10,}")
+            lines.append(f"    Weak   (in/out): {m.weak_tokens_input:>10,} / {m.weak_tokens_output:>10,}")
+
         if self.metrics.total_embedding_tokens > 0:
             lines.append(f"  Embedding Tokens:  {self.metrics.total_embedding_tokens:>12,}")
         if self.metrics.total_reasoning_tokens > 0:
@@ -459,22 +605,46 @@ class MetricsTracker:
         if self.metrics.total_cache_read_tokens > 0:
             lines.append(f"  Cache Read:        {self.metrics.total_cache_read_tokens:>12,}")
         lines.append(f"  Estimated Cost: ${self.estimate_cost():.4f}")
-        lines.append(
-            f"  (Rates: ${self.metrics.input_cost_per_million}/M input, "
-            f"${self.metrics.output_cost_per_million}/M output)"
-        )
+
+        if self._has_tier_rates():
+            s_in = m.strong_input_cost_per_million or m.input_cost_per_million
+            s_out = m.strong_output_cost_per_million or m.output_cost_per_million
+            w_in = m.weak_input_cost_per_million or m.input_cost_per_million
+            w_out = m.weak_output_cost_per_million or m.output_cost_per_million
+            lines.append(f"  (Strong rates: ${s_in}/M in, ${s_out}/M out)")
+            lines.append(f"  (Weak rates:   ${w_in}/M in, ${w_out}/M out)")
+        else:
+            lines.append(
+                f"  (Rates: ${self.metrics.input_cost_per_million}/M input, "
+                f"${self.metrics.output_cost_per_million}/M output)"
+            )
 
         lines.append("")
         lines.append("=" * 70)
         return "\n".join(lines)
 
     def get_phase_cost(self, phase_name: str) -> float:
-        """Calculate estimated cost for a specific phase based on its tokens."""
+        """Calculate estimated cost for a specific phase based on its tokens and tier."""
         if phase_name not in self.metrics.phases:
             return 0.0
         phase = self.metrics.phases[phase_name]
-        input_cost = (phase.llm_tokens_input / 1_000_000) * self.metrics.input_cost_per_million
-        output_cost = (phase.llm_tokens_output / 1_000_000) * self.metrics.output_cost_per_million
+        m = self.metrics
+
+        # Use per-tier rates if configured and phase has a tier mapping
+        tier = self.phase_tier_map.get(phase_name)
+        if self._has_tier_rates() and tier:
+            if tier == "strong":
+                in_rate = m.strong_input_cost_per_million or m.input_cost_per_million
+                out_rate = m.strong_output_cost_per_million or m.output_cost_per_million
+            else:
+                in_rate = m.weak_input_cost_per_million or m.input_cost_per_million
+                out_rate = m.weak_output_cost_per_million or m.output_cost_per_million
+        else:
+            in_rate = m.input_cost_per_million
+            out_rate = m.output_cost_per_million
+
+        input_cost = (phase.llm_tokens_input / 1_000_000) * in_rate
+        output_cost = (phase.llm_tokens_output / 1_000_000) * out_rate
         return input_cost + output_cost
 
     def get_phase_stats(self, phase_name: str) -> Optional[Dict]:
@@ -525,6 +695,7 @@ class MetricsTracker:
             "update_interval": self.update_interval,
             "current_phase": self._current_phase,
             "tracked_phases": list(self.tracked_phases),
+            "phase_tier_map": dict(self.phase_tier_map),
             "checkpoint_timestamp": time.time(),
         }
 
@@ -570,8 +741,9 @@ class MetricsTracker:
         # Restore the metrics object (overwrite the fresh one)
         tracker.metrics = WorkflowMetrics.from_dict(saved_metrics)
 
-        # Restore current phase
+        # Restore current phase and tier map
         tracker._current_phase = data.get("current_phase")
+        tracker.phase_tier_map = data.get("phase_tier_map", {})
 
         # Handle interrupted phases (were running when checkpoint was saved)
         checkpoint_time = data.get("checkpoint_timestamp", time.time())
@@ -604,6 +776,7 @@ class MetricsTracker:
             return
 
         # Workflow was previously started - just restart live display
+        self._session_start = time.time()  # track THIS session's start separately
         if self.enable_live_display and self._display_thread is None:
             self._start_live_display()
 

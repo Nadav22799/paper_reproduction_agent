@@ -19,7 +19,9 @@ import shutil
 from .utils.checkpoint_manager import ExperimentCheckpoint
 from .utils.hierarchical_context import HierarchicalContextManager
 from .utils.metrics_tracker import MetricsTracker
-
+from rich import print as rprint  # injected for better CLI formatting
+from rich.console import Console
+from rich.panel import Panel
 
 def remove_readonly(func, path, _):
     """Clear the readonly bit and reattempt the removal"""
@@ -133,6 +135,13 @@ class PaperReproductionState(TypedDict):
     cycle_count: int                    # Prevent infinite loops
     max_cycles: int                     # Default: 5
 
+    # === RUN MODE ===
+    run_mode: str                       # "reproduce", "reproduce+generalize", "generalize"
+
+    # === GENERALIZATION GAP ===
+    generalization_results: Optional[dict]   # Results from generalization agent
+    generalization_success: bool             # Whether novelty generalizes
+
     # === NEW: USER INPUT GATE ===
     user_input_required: Optional[dict]   # {description, items: [{name, type, description, instructions}]}
     user_input_response: Optional[dict]   # User's responses (filled by CLI)
@@ -173,10 +182,11 @@ class PaperReproductionOrchestrator:
         from .utils.logging_callback import LoggingCallbackHandler
         from .config import ReproductionConfig
 
-        self.llm = llm or create_llm(temperature=0.1)
-        # Create a specialized "Reasoning LLM" with chain-of-thought enabled (if supported)
-        # This is used for complex agents like Supervisor and Planner
-        self.reasoning_llm = create_llm(temperature=0.3, include_thoughts=True)
+        self.llm = llm or create_llm(temperature=0.1, tier="strong")
+        # Strong LLM with chain-of-thought for complex agents (Planning, Execution, EnvSetup, Generalization)
+        self.reasoning_llm = create_llm(temperature=0.3, include_thoughts=True, tier="strong")
+        # Weak LLM for simple agents (Supervisor routing, Critic, DataPrep, Validation)
+        self.weak_llm = create_llm(temperature=0.0, include_thoughts=False, tier="weak")
         self.config = ReproductionConfig()
 
         # Determine which architecture to use
@@ -197,7 +207,16 @@ class PaperReproductionOrchestrator:
             output_cost_per_million=self.config.llm_output_cost_per_million,
             phases=phases,
         )
-        print("📊 Metrics tracker initialized")
+        # Map phases to LLM tiers for accurate per-tier cost tracking
+        self.metrics_tracker.phase_tier_map = {
+            "analyze_paper": "strong", "decide_and_clone": "strong",
+            "planning": "strong", "environment_setup": "strong",
+            "execution": "strong", "generalization": "strong",
+            "supervisor": "weak", "critic": "weak",
+            "data_prep": "weak", "validation": "weak",
+            "unified_reproduction": "strong", "generate_report": "weak",
+        }
+        rprint("📊 Metrics tracker initialized")
 
         # Setup logging
         self.enable_logging = enable_logging
@@ -222,7 +241,7 @@ class PaperReproductionOrchestrator:
             self.checkpoint_manager = ExperimentCheckpoint(
                 checkpoint_dir=self.config.checkpoints_path
             )
-            print("💾 Checkpoint system enabled")
+            rprint("💾 Checkpoint system enabled")
 
         # Initialize embedder using factory (API-based by default for speed)
         # Store as instance variable for checkpoint restore
@@ -243,7 +262,7 @@ class PaperReproductionOrchestrator:
             max_tokens=100000,  # Larger budget for orchestrator
             embedder=self._embedder,  # Use factory-created embedder (API or local)
         )
-        print("🧠 Hierarchical context manager initialized")
+        rprint("🧠 Hierarchical context manager initialized")
 
         # NOTE: Do NOT call start_workflow() here - it should be called by
         # CLI/run() AFTER checkpoint restore to prevent orphan display threads
@@ -271,9 +290,9 @@ class PaperReproductionOrchestrator:
         # Initialize supervisor architecture agents if enabled
         if self.use_supervisor:
             self._init_supervisor_agents()
-            print("🎯 Supervisor architecture ENABLED")
+            Console().print("🎯 [bold green]Supervisor architecture ENABLED[/bold green]")
         else:
-            print("📋 Legacy architecture (set USE_SUPERVISOR_ARCHITECTURE=true for cyclic)")
+            rprint("📋 Legacy architecture (set USE_SUPERVISOR_ARCHITECTURE=true for cyclic)")
 
         # Build the workflow graph
         self.workflow = self._build_workflow()
@@ -286,9 +305,10 @@ class PaperReproductionOrchestrator:
         from .agents.data_prep_agent import DataPrepAgent
         from .agents.execution_agent import ExecutionAgent
         from .agents.validation_agent import ValidationAgent
+        from .agents.generalization_agent import GeneralizationAgent
 
         self.supervisor_agent = SupervisorAgent(
-            self.reasoning_llm,  # Use Thinking Mode for complex routing
+            self.weak_llm,  # Simple routing/classification — weak tier
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
@@ -304,9 +324,10 @@ class PaperReproductionOrchestrator:
             metrics_tracker=self.metrics_tracker,
             enable_llm_critic=self.config.enable_llm_critic,
             callbacks=[self.logging_callback] if self.logging_callback else [],
+            llm=self.weak_llm,  # Simple approve/reject classification — weak tier
         )
         self.data_prep_agent = DataPrepAgent(
-            self.reasoning_llm,
+            self.weak_llm,  # Straightforward download/verify — weak tier
             max_iterations=150,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
@@ -322,11 +343,19 @@ class PaperReproductionOrchestrator:
             critic_mode=self.config.critic_mode,
         )
         self.validation_agent = ValidationAgent(
-            self.reasoning_llm,
+            self.weak_llm,  # Simple metric comparison — weak tier
             max_iterations=90,
             metrics_tracker=self.metrics_tracker,
             hierarchical_context=self.hierarchical_context,
             callbacks=[self.logging_callback] if self.logging_callback else [],
+        )
+        self.generalization_agent = GeneralizationAgent(
+            self.reasoning_llm,
+            max_iterations=150,
+            metrics_tracker=self.metrics_tracker,
+            hierarchical_context=self.hierarchical_context,
+            callbacks=[self.logging_callback] if self.logging_callback else [],
+            critic_mode=self.config.critic_mode,
         )
 
     def _update_metrics_tracker_references(self, new_tracker):
@@ -365,6 +394,8 @@ class PaperReproductionOrchestrator:
             self.execution_agent.metrics_tracker = new_tracker
         if hasattr(self, 'validation_agent') and self.validation_agent:
             self.validation_agent.metrics_tracker = new_tracker
+        if hasattr(self, 'generalization_agent') and self.generalization_agent:
+            self.generalization_agent.metrics_tracker = new_tracker
 
     def _build_workflow(self) -> StateGraph:
         """Build the LangGraph workflow based on architecture setting."""
@@ -453,6 +484,7 @@ class PaperReproductionOrchestrator:
         workflow.add_node("data_prep", self._data_prep_node)
         workflow.add_node("execution", self._execution_node)
         workflow.add_node("validation", self._validation_node)
+        workflow.add_node("generalization", self._generalization_node)
 
         # === PHASE 6: Reporting ===
         workflow.add_node("generate_report", self._generate_report_node)
@@ -549,10 +581,14 @@ class PaperReproductionOrchestrator:
             "validation",
             self._route_after_validation,
             {
+                "generalization": "generalization",
                 "continue": "generate_report",
                 "retry_execution": "supervisor",
             },
         )
+
+        # === GENERALIZATION → REPORT ===
+        workflow.add_edge("generalization", "generate_report")
 
         workflow.add_edge("generate_report", END)
 
@@ -576,17 +612,17 @@ class PaperReproductionOrchestrator:
             preview = str(reasoning)[:300].replace('\n', ' ').strip()
             if len(reasoning) > 300:
                 preview += "..."
-            print(f"   💭 {agent_name} reasoning: {preview}")
+            rprint(f"   💭 {agent_name} reasoning: {preview}")
 
     def _planning_node(self, state: PaperReproductionState) -> PaperReproductionState:
         """Planning node - creates or updates reproduction checklist."""
         # Check if this phase was already completed (resuming from checkpoint)
         if self._is_phase_completed(state, "planning"):
-            print("⏭️  Skipping planning (already completed from checkpoint)")
+            rprint("⏭️  Skipping planning (already completed from checkpoint)")
             return state
 
         self.metrics_tracker.start_phase("planning")
-        print("📋 Planning: Creating reproduction checklist...")
+        rprint("📋 Planning: Creating reproduction checklist...")
 
         # Check if this is an update request or initial planning
         update_request = state.get("planning_update_request")
@@ -608,9 +644,9 @@ class PaperReproductionOrchestrator:
             state["user_input_required"] = user_input_req
             state["waiting_for_user"] = True
             state["final_status"] = "waiting_for_user_input"
-            print("⏸️  Planning detected user input requirements — workflow will pause")
+            rprint("⏸️  Planning detected user input requirements — workflow will pause")
             for item in user_input_req.get("items", []):
-                print(f"   - {item.get('name', 'unknown')}: {item.get('description', '')[:80]}")
+                rprint(f"   - {item.get('name', 'unknown')}: {item.get('description', '')[:80]}")
 
         # Store and optionally print reasoning
         state["current_reasoning"] = result.get("last_message", "")
@@ -625,15 +661,15 @@ class PaperReproductionOrchestrator:
     def _supervisor_node(self, state: PaperReproductionState) -> PaperReproductionState:
         """Supervisor node - decides which agent to invoke next."""
         self.metrics_tracker.start_phase("supervisor")
-        print("🎯 Supervisor: Analyzing state and routing...")
+        rprint("🎯 Supervisor: Analyzing state and routing...")
 
         decision = self.supervisor_agent.decide_next_agent(state)
 
         state["current_agent"] = decision.get("agent", "")
         state["supervisor_directive"] = decision.get("directive", "")
 
-        print(f"   → Routing to: {state['current_agent']}")
-        print(f"   → Directive: {state['supervisor_directive'][:80]}...")
+        rprint(f"   → Routing to: {state['current_agent']}")
+        rprint(f"   → Directive: {state['supervisor_directive'][:80]}...")
 
         self.metrics_tracker.end_phase("supervisor")
         return state
@@ -646,15 +682,15 @@ class PaperReproductionOrchestrator:
         directive = state.get("supervisor_directive")
         
         if action:
-            print(f"🔍 Critic: Inspecting action: {action.get('tool_name')}")
+            rprint(f"🔍 Critic: Inspecting action: {action.get('tool_name')}")
             # Optionally print args if they aren't huge
             args = str(action.get('tool_args', {}))
             if len(args) < 200:
-                print(f"   Args: {args}")
+                rprint(f"   Args: {args}")
         elif directive:
-            print(f"🔍 Critic: Inspecting directive: '{directive[:100]}...'")
+            rprint(f"🔍 Critic: Inspecting directive: '{directive[:100]}...'")
         else:
-            print("🔍 Critic: Inspecting state...")
+            rprint("🔍 Critic: Inspecting state...")
 
         result = self.critic_agent.inspect_action(state)
 
@@ -665,9 +701,9 @@ class PaperReproductionOrchestrator:
             blocked_actions = state.get("blocked_actions", [])
             blocked_actions.extend(result.get("blocked_actions", []))
             state["blocked_actions"] = blocked_actions
-            print(f"   ❌ BLOCKED: {state['critic_feedback']}")
+            rprint(f"   ❌ BLOCKED: {state['critic_feedback']}")
         else:
-            print("   ✅ Action approved")
+            rprint("   ✅ Action approved")
 
         self.metrics_tracker.end_phase("critic")
         return state
@@ -682,7 +718,7 @@ class PaperReproductionOrchestrator:
         if not is_retry and self._is_phase_completed(state, "data_prep"):
             # Validate checkpoint before skipping
             if self._validate_data_prep_checkpoint(state):
-                print("⏭️  Skipping data_prep (already completed from checkpoint)")
+                rprint("⏭️  Skipping data_prep (already completed from checkpoint)")
                 # Ensure phase status is consistent
                 phase_status = state.get("phase_status", {})
                 if phase_status.get("data_prep") != "completed":
@@ -692,7 +728,7 @@ class PaperReproductionOrchestrator:
             # If validation failed, phase was invalidated - continue to re-run
 
         self.metrics_tracker.start_phase("data_prep")
-        print("📦 Data Prep: Preparing datasets...")
+        rprint("📦 Data Prep: Preparing datasets...")
 
         result = self.data_prep_agent.prepare_data(state)
 
@@ -728,7 +764,7 @@ class PaperReproductionOrchestrator:
         if not is_retry and self._is_phase_completed(state, "execution"):
             # Validate checkpoint before skipping - ensure actual results exist
             if self._validate_execution_checkpoint(state):
-                print("⏭️  Skipping execution (already completed from checkpoint)")
+                rprint("⏭️  Skipping execution (already completed from checkpoint)")
                 # Ensure phase status is consistent
                 phase_status = state.get("phase_status", {})
                 if phase_status.get("execution") != "completed":
@@ -738,7 +774,7 @@ class PaperReproductionOrchestrator:
             # If validation failed, phase was invalidated - continue to re-run
 
         self.metrics_tracker.start_phase("execution")
-        print("🚀 Execution: Running experiments...")
+        rprint("🚀 Execution: Running experiments...")
 
         import time
         start_exp = time.time()
@@ -760,7 +796,7 @@ class PaperReproductionOrchestrator:
             
             # Use LLM to get true error class (DATA, CODE, ENVIRONMENT)
             llm_class = self.supervisor_agent.classify_error(original_msg)
-            print(f"   🧠 Execution Error classified as: {llm_class}")
+            rprint(f"   🧠 Execution Error classified as: {llm_class}")
             
             # Map LLM class to system error types
             if llm_class == "DATA":
@@ -795,7 +831,7 @@ class PaperReproductionOrchestrator:
         """Validation node - verifies results against paper."""
         # Check if this phase was already completed
         if self._is_phase_completed(state, "validation"):
-            print("⏭️  Skipping validation (already completed from checkpoint)")
+            rprint("⏭️  Skipping validation (already completed from checkpoint)")
              # Ensure phase status is consistent
             phase_status = state.get("phase_status", {})
             if phase_status.get("validation") != "completed":
@@ -804,7 +840,7 @@ class PaperReproductionOrchestrator:
             return state
 
         self.metrics_tracker.start_phase("validation")
-        print("📊 Validation: Verifying results...")
+        rprint("📊 Validation: Verifying results...")
 
         result = self.validation_agent.verify_results(state)
 
@@ -827,6 +863,49 @@ class PaperReproductionOrchestrator:
         # Save checkpoint
         self._save_checkpoint(state, "validation", success=True)
         
+        return state
+
+    def _generalization_node(self, state: PaperReproductionState) -> PaperReproductionState:
+        """Generalization node - tests novelty on external data."""
+        if self._is_phase_completed(state, "generalization"):
+            rprint("⏭️  Skipping generalization (already completed from checkpoint)")
+            phase_status = state.get("phase_status", {})
+            if phase_status.get("generalization") != "completed":
+                phase_status["generalization"] = "completed"
+                state["phase_status"] = phase_status
+            return state
+
+        self.metrics_tracker.start_phase("generalization")
+        rprint("🔬 Generalization: Testing novelty on external data...")
+
+        import time
+        start_time = time.time()
+        result = self.generalization_agent.analyze_generalization(state)
+        self.metrics_tracker.record_experiment_time("generalization", time.time() - start_time)
+
+        state["current_reasoning"] = result.get("generalization_report", "")
+        self._print_reasoning_if_verbose(state["current_reasoning"], "Generalization")
+
+        state["generalization_results"] = result
+        state["generalization_success"] = result.get("generalization_success", False)
+
+        # Check if user input is needed (blocked adaptation)
+        user_input_req = result.get("user_input_required")
+        if user_input_req and not state.get("user_input_response"):
+            state["user_input_required"] = user_input_req
+            state["waiting_for_user"] = True
+            state["final_status"] = "waiting_for_user_input"
+            rprint("⏸️  Generalization requires user input — workflow will pause")
+
+        # Update phase status
+        phase_status = state.get("phase_status", {})
+        phase_status["generalization"] = "completed" if result.get("generalization_success") else "failed"
+        state["phase_status"] = phase_status
+
+        success = result.get("generalization_success", False)
+        self.metrics_tracker.end_phase("generalization", success=success)
+        self._save_checkpoint(state, "generalization", success=True)
+
         return state
 
     # === NEW SUPERVISOR ARCHITECTURE ROUTING FUNCTIONS ===
@@ -858,7 +937,7 @@ class PaperReproductionOrchestrator:
             state["phase_status"] = phase_status
             state["datasets_ready"] = True
             state["dataset_results"] = {"skipped": True, "reason": "Scripts auto-download data"}
-            print("   📦 Data prep marked as completed (skipped)")
+            rprint("   📦 Data prep marked as completed (skipped)")
 
         return agent
 
@@ -882,7 +961,7 @@ class PaperReproductionOrchestrator:
 
             if retry_count < max_retries:
                 if error_type == "data":
-                    print("   ↪️  Routing environment failure to Data Prep (missing data detected)")
+                    rprint("   ↪️  Routing environment failure to Data Prep (missing data detected)")
                     return "data_fix"
                 return "retry"
 
@@ -932,7 +1011,7 @@ class PaperReproductionOrchestrator:
             state["cycle_count"] = state.get("cycle_count", 0) + 1
 
             if state.get("cycle_count", 0) >= state.get("max_cycles", 5):
-                print("🛑 Max cycles reached, generating report")
+                rprint("🛑 Max cycles reached, generating report")
                 return "failed"
 
             if retry_count >= max_retries:
@@ -949,8 +1028,15 @@ class PaperReproductionOrchestrator:
         return "failed"
 
     def _route_after_validation(self, state: PaperReproductionState) -> str:
-        """Route after validation."""
+        """Route after validation — optionally to generalization if mode allows."""
+        run_mode = state.get("run_mode", "reproduce")
+
         if state.get("results_match", False):
+            # Check if generalization should run
+            vr = state.get("verification_results", {})
+            passed = vr.get("experiments_passed", 0)
+            if passed > 0 and run_mode in ("reproduce+generalize", "generalize"):
+                return "generalization"
             return "continue"
 
         # Check if we should retry execution
@@ -968,128 +1054,158 @@ class PaperReproductionOrchestrator:
         """Analyze the paper using UnifiedPaperAnalyzer."""
         # Check if this phase was already completed (resuming from checkpoint)
         if self._is_phase_completed(state, "analyze_paper"):
-            print("⏭️  Skipping analyze_paper (already completed from checkpoint)")
+            rprint("⏭️  Skipping analyze_paper (already completed from checkpoint)")
             return state
 
         self.metrics_tracker.start_phase("analyze_paper")
-        print("📄 Analyzing paper...")
+        rprint("📄 Analyzing paper...")
 
-        paper_input = state["paper_input"]
+        paper_input = state["paper_input"].strip()
 
-        # Handle arXiv papers
-        if paper_input.startswith("arxiv:") or (
-            len(paper_input.split()) == 1 and "." in paper_input
-        ):
-            arxiv_id = paper_input.replace("arxiv:", "")
-            print(f"📥 Fetching arXiv paper {arxiv_id}...")
+        try:
+            from PyPDF2 import PdfReader
+            from urllib.request import urlretrieve
+            import re
 
-            try:
+            download_dir = os.path.abspath(self.config.downloads_path)
+            os.makedirs(download_dir, exist_ok=True)
+
+            # ── Normalise input type ──────────────────────────────────────────
+            is_url = paper_input.startswith("http://") or paper_input.startswith("https://")
+
+            # arXiv URL → extract bare ID and treat as arXiv ID
+            if is_url and "arxiv.org" in paper_input:
+                m = re.search(r"(\d{4}\.\d{4,5}(?:v\d+)?)", paper_input)
+                if m:
+                    paper_input = m.group(1)
+                    is_url = False
+
+            is_local = not is_url and (
+                os.path.exists(paper_input) or paper_input.lower().endswith(".pdf")
+            )
+            is_arxiv = not is_url and not is_local
+
+            pdf_path = None
+            meta_base: dict = {}
+
+            # ── Branch 1: arXiv ID ────────────────────────────────────────────
+            if is_arxiv:
                 import arxiv
-                from PyPDF2 import PdfReader
-                from urllib.request import urlretrieve
-                import re
+                arxiv_id = paper_input.replace("arxiv:", "")
+                rprint(f"📥 Fetching arXiv paper {arxiv_id}...")
 
-                # Setup paths
-                download_dir = os.path.abspath(self.config.downloads_path)
-                os.makedirs(download_dir, exist_ok=True)
-                safe_arxiv_id = arxiv_id.replace("/", "_").replace(".", "_")
-                filename = f"{safe_arxiv_id}.pdf"
-                pdf_path = os.path.join(download_dir, filename)
-                pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-
-                # Check if PDF already exists locally (cache hit)
+                safe_id = arxiv_id.replace("/", "_").replace(".", "_")
+                pdf_path = os.path.join(download_dir, f"{safe_id}.pdf")
+                pdf_url  = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
                 pdf_exists = os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1000
 
-                # Try to fetch metadata from arXiv API
                 paper = None
                 try:
                     search = arxiv.Search(id_list=[arxiv_id])
                     paper = next(search.results())
                 except Exception as api_error:
                     if pdf_exists:
-                        print(f"⚠️  arXiv API error: {api_error}")
-                        print(f"✅ Using cached PDF: {pdf_path}")
+                        rprint(f"⚠️  arXiv API error: {api_error}")
+                        rprint(f"✅ Using cached PDF: {pdf_path}")
                     else:
-                        raise  # Re-raise if we can't use cache
+                        raise
 
-                # Download PDF if not cached
                 if not pdf_exists:
-                    print(f"   Downloading from: {pdf_url}")
+                    rprint(f"   Downloading from: {pdf_url}")
                     urlretrieve(pdf_url, pdf_path)
                 else:
-                    print(f"   Using cached PDF: {pdf_path}")
+                    rprint(f"   Using cached PDF: {pdf_path}")
 
-                # Extract text from PDF
-                reader = PdfReader(pdf_path)
-                full_text = ""
-                for page in reader.pages:
-                    full_text += page.extract_text() + "\n"
-
-                # Truncate before bibliography/appendix
-                truncate_patterns = [
-                    r"\n\s*\d+\.?\s+References\s*\n",
-                    r"\n\s*\d+\.?\s+Bibliography\s*\n",
-                    r"\nReferences\s*\n",
-                    r"\nBibliography\s*\n",
-                    r"\nREFERENCES\s*\n",
-                    r"\n\s*[A-Z]\.?\s+Appendix",
-                    r"\nAppendix\s+[A-Z]",
-                    r"\nAPPENDIX",
-                    r"\n\s*Supplementary\s+Material\s*\n",
-                    r"\n\s*Acknowledgment",
-                ]
-                for pattern in truncate_patterns:
-                    match = re.search(pattern, full_text)
-                    if match:
-                        full_text = full_text[: match.start()]
-                        print(f"📄 Truncated paper at '{match.group().strip()}'")
-                        break
-
-                # Store metadata (handle case where arXiv API failed but we have cached PDF)
                 if paper:
-                    state["paper_metadata"] = {
-                        "title": paper.title,
-                        "authors": [author.name for author in paper.authors],
-                        "abstract": paper.summary,
-                        "published": paper.published.isoformat(),
-                        "arxiv_id": arxiv_id,
-                        "pdf_url": pdf_url,
-                        "full_text": full_text,
+                    meta_base = {
+                        "title":      paper.title,
+                        "authors":    [a.name for a in paper.authors],
+                        "abstract":   paper.summary,
+                        "published":  paper.published.isoformat(),
+                        "arxiv_id":   arxiv_id,
+                        "pdf_url":    pdf_url,
                         "categories": paper.categories,
                     }
-                    state["paper_title"] = paper.title
                 else:
-                    # Fallback: extract title from PDF text (first non-empty line, likely title)
-                    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-                    inferred_title = lines[0] if lines else f"Paper {arxiv_id}"
-                    print("⚠️  Using cached PDF without arXiv metadata")
-                    print(f"   Inferred title: {inferred_title[:80]}...")
-                    state["paper_metadata"] = {
-                        "title": inferred_title,
-                        "authors": [],
-                        "abstract": "",
-                        "published": "",
-                        "arxiv_id": arxiv_id,
-                        "pdf_url": pdf_url,
-                        "full_text": full_text,
-                        "categories": [],
+                    meta_base = {
+                        "title": "", "authors": [], "abstract": "",
+                        "published": "", "arxiv_id": arxiv_id,
+                        "pdf_url": pdf_url, "categories": [],
                     }
-                    state["paper_title"] = inferred_title
-                print(
-                    f"✅ Extracted {len(full_text)} characters of text from PDF"
-                )
 
-            except Exception as e:
-                print(f"⚠️  Failed to fetch paper: {str(e)}")
-                import traceback
+            # ── Branch 2: Generic PDF URL ─────────────────────────────────────
+            elif is_url:
+                rprint(f"📥 Downloading PDF from URL: {paper_input}")
+                url_filename = paper_input.split("/")[-1].split("?")[0]
+                if not url_filename.lower().endswith(".pdf"):
+                    url_filename = "paper_download.pdf"
+                pdf_path = os.path.join(download_dir, url_filename)
+                if not (os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1000):
+                    urlretrieve(paper_input, pdf_path)
+                else:
+                    rprint(f"   Using cached PDF: {pdf_path}")
+                meta_base = {
+                    "title": "", "authors": [], "abstract": "",
+                    "published": "", "pdf_url": paper_input, "categories": [],
+                }
 
-                traceback.print_exc()
-                return state
+            # ── Branch 3: Local PDF file ──────────────────────────────────────
+            elif is_local:
+                pdf_path = os.path.abspath(paper_input)
+                if not os.path.exists(pdf_path):
+                    rprint(f"❌ Local file not found: {pdf_path}")
+                    return state
+                rprint(f"📂 Reading local PDF: {pdf_path}")
+                meta_base = {
+                    "title": "", "authors": [], "abstract": "",
+                    "published": "", "pdf_url": f"file://{pdf_path}", "categories": [],
+                }
+
+            # ── Extract text from PDF ─────────────────────────────────────────
+            reader    = PdfReader(pdf_path)
+            full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+            # Truncate before bibliography / appendix
+            truncate_patterns = [
+                r"\n\s*\d+\.?\s+References\s*\n",
+                r"\n\s*\d+\.?\s+Bibliography\s*\n",
+                r"\nReferences\s*\n",
+                r"\nBibliography\s*\n",
+                r"\nREFERENCES\s*\n",
+                r"\n\s*[A-Z]\.?\s+Appendix",
+                r"\nAppendix\s+[A-Z]",
+                r"\nAPPENDIX",
+                r"\n\s*Supplementary\s+Material\s*\n",
+                r"\n\s*Acknowledgment",
+            ]
+            for pattern in truncate_patterns:
+                match = re.search(pattern, full_text)
+                if match:
+                    full_text = full_text[: match.start()]
+                    rprint(f"📄 Truncated paper at '{match.group().strip()}'")
+                    break
+
+            # Infer title from first non-empty PDF line when metadata is missing
+            if not meta_base.get("title"):
+                lines = [l.strip() for l in full_text.split("\n") if l.strip()]
+                meta_base["title"] = lines[0][:120] if lines else "Unknown Paper"
+                rprint(f"   Inferred title: {meta_base['title']}")
+
+            meta_base["full_text"] = full_text
+            state["paper_metadata"] = meta_base
+            state["paper_title"]    = meta_base["title"]
+            rprint(f"✅ Extracted {len(full_text)} characters of text from PDF")
+
+        except Exception as e:
+            rprint(f"⚠️  Failed to fetch paper: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return state
 
         # Analyze paper with unified analyzer
         full_text = state.get("paper_metadata", {}).get("full_text", "")
         if full_text:
-            print("🔬 Analyzing paper with unified analyzer...")
+            rprint("🔬 Analyzing paper with unified analyzer...")
             from .agents.unified_paper_analyzer import UnifiedPaperAnalyzer
 
             analyzer = UnifiedPaperAnalyzer(
@@ -1120,7 +1236,7 @@ class PaperReproductionOrchestrator:
 
             # Fallback discovery is now handled by DiscoveryAgent in the next node
             if not state["code_references"]:
-                print("   (Code discovery deferred to Discovery Agent)")
+                rprint("   (Code discovery deferred to Discovery Agent)")
         else:
             state["code_references"] = []
             state["paper_results"] = {}
@@ -1207,18 +1323,18 @@ class PaperReproductionOrchestrator:
                     lazy=True,
                 )
 
-            print("   🧠 Stored paper context in hierarchical storage")
+            rprint("   🧠 Stored paper context in hierarchical storage")
 
         except Exception as e:
-            print(f"   ⚠️  Warning: Failed to store paper context: {e}")
+            rprint(f"   ⚠️  Warning: Failed to store paper context: {e}")
 
     def _print_analysis_summary(self, state, analysis):
         """Print detailed analysis results."""
         import textwrap
 
-        print("\n" + "=" * 80)
-        print("📊 UNIFIED ANALYZER FINDINGS")
-        print("=" * 80)
+        rprint("\n" + "=" * 80)
+        rprint("📊 UNIFIED ANALYZER FINDINGS")
+        rprint("=" * 80)
 
         # GitHub Repositories
         repos = state["code_references"]
@@ -1231,30 +1347,30 @@ class PaperReproductionOrchestrator:
                 else:
                     repo_urls.append(str(r))
 
-        print(f"\n📚 GitHub Repositories Found: {len(repo_urls)}")
+        rprint(f"\n📚 GitHub Repositories Found: {len(repo_urls)}")
         for i, repo in enumerate(repo_urls, 1):
-            print(f"   {i}. {repo}")
+            rprint(f"   {i}. {repo}")
         if not repo_urls:
-            print("   (none found)")
+            rprint("   (none found)")
 
         # Datasets
         datasets = analysis.get("datasets", [])
-        print(f"\n📊 Datasets Identified: {len(datasets)}")
+        rprint(f"\n📊 Datasets Identified: {len(datasets)}")
         if datasets:
-            print(f"   {', '.join(datasets)}")
+            rprint(f"   {', '.join(datasets)}")
         else:
-            print("   (none identified)")
+            rprint("   (none identified)")
 
         # Core Contribution
-        print("\n💡 Core Contribution:")
+        rprint("\n💡 Core Contribution:")
         core = analysis.get("core_contribution", "N/A")
         if core:
             wrapped = textwrap.fill(
                 core, width=74, initial_indent="   ", subsequent_indent="   "
             )
-            print(wrapped)
+            rprint(wrapped)
         else:
-            print("   (not extracted)")
+            rprint("   (not extracted)")
 
         # Results to Reproduce
         paper_results = state.get("paper_results", {})
@@ -1263,27 +1379,27 @@ class PaperReproductionOrchestrator:
             paper_results = {}
 
         metrics = paper_results.get("metrics", [])
-        print(f"\n🎯 Results to Reproduce: {len(metrics)} metric(s)")
+        rprint(f"\n🎯 Results to Reproduce: {len(metrics)} metric(s)")
         if metrics:
             for m in metrics[:5]:
                 if isinstance(m, dict):
                     dataset = m.get("dataset", "Unknown")
                     metric = m.get("metric", "Unknown")
                     value = m.get("value", "Unknown")
-                    print(f"   - {dataset}: {metric} = {value}")
+                    rprint(f"   - {dataset}: {metric} = {value}")
             if len(metrics) > 5:
-                print(f"   ... and {len(metrics) - 5} more")
+                rprint(f"   ... and {len(metrics) - 5} more")
         else:
             summary = paper_results.get("summary", "")
             if summary:
-                print("   Summary from paper:")
+                rprint("   Summary from paper:")
                 for line in summary.split("\n")[:3]:
                     if line.strip():
-                        print(f"   {line.strip()[:74]}")
+                        rprint(f"   {line.strip()[:74]}")
             else:
-                print("   (no metrics extracted)")
+                rprint("   (no metrics extracted)")
 
-        print("\n" + "=" * 80 + "\n")
+        rprint("\n" + "=" * 80 + "\n")
 
     def _decide_and_clone_node(
         self, state: PaperReproductionState
@@ -1291,11 +1407,11 @@ class PaperReproductionOrchestrator:
         """Decide on implementation path and clone repository if found."""
         # Check if this phase was already completed (resuming from checkpoint)
         if self._is_phase_completed(state, "decide_and_clone"):
-            print("⏭️  Skipping decide_and_clone (already completed from checkpoint)")
+            rprint("⏭️  Skipping decide_and_clone (already completed from checkpoint)")
             return state
 
         self.metrics_tracker.start_phase("decide_and_clone")
-        print("🤔 Deciding on implementation path...")
+        rprint("🤔 Deciding on implementation path...")
 
         # FIRST: Check if repo already exists on disk (fallback for when APIs fail)
         code_path = self.config.repo_path
@@ -1309,8 +1425,8 @@ class PaperReproductionOrchestrator:
                     # Check if it looks like a valid git repo
                     git_dir = os.path.join(code_path, ".git")
                     if os.path.isdir(git_dir):
-                        print(f"✅ Found existing repository: {existing_url}")
-                        print("   Skipping discovery and using existing repo.")
+                        rprint(f"✅ Found existing repository: {existing_url}")
+                        rprint("   Skipping discovery and using existing repo.")
                         state["selected_repo"] = {
                             "url": existing_url,
                             "source": "existing_local",
@@ -1322,7 +1438,7 @@ class PaperReproductionOrchestrator:
                         self.metrics_tracker.end_phase("decide_and_clone", success=True)
                         return state
             except Exception as e:
-                print(f"⚠️  Could not read existing repo marker: {e}")
+                rprint(f"⚠️  Could not read existing repo marker: {e}")
 
         # Prepare inputs for Discovery Agent
         paper_title = state.get("paper_title", "")
@@ -1331,15 +1447,23 @@ class PaperReproductionOrchestrator:
         authors = state.get("paper_metadata", {}).get("authors", [])
 
         # Format existing refs for the agent (from paper analysis)
+        # Strip trailing punctuation that LLMs often include when extracting URLs from paper text
+        def _clean_url(u):
+            return u.rstrip(".,;:!?)'\"`").strip() if u else None
+
         existing_refs = []
         if state.get("code_references"):
             refs = state["code_references"]
             if isinstance(refs, list):
                 for ref in refs:
                     if isinstance(ref, dict):
-                        existing_refs.append(ref.get("url"))
+                        url = _clean_url(ref.get("url"))
                     elif isinstance(ref, str):
-                        existing_refs.append(ref)
+                        url = _clean_url(ref)
+                    else:
+                        url = None
+                    if url:
+                        existing_refs.append(url)
 
         # CALL DISCOVERY AGENT
         discovery_result = self.discovery_agent.find_best_implementation(
@@ -1359,7 +1483,7 @@ class PaperReproductionOrchestrator:
                 "confidence": discovery_result.get("confidence"),
             }
             state["messages"].append(f"📥 Using implementation: {selected_url}")
-            print(f"✅ Discovery Agent selected: {selected_url}")
+            rprint(f"✅ Discovery Agent selected: {selected_url}")
 
             # Clone the repository
             code_path = self.config.repo_path
@@ -1367,25 +1491,48 @@ class PaperReproductionOrchestrator:
 
             need_clone = True
             if os.path.exists(code_path):
+                existing_url = ""
+                existing_paper_id = "unknown"
+                
+                # Try to identify the existing repo
                 if os.path.exists(repo_marker):
                     try:
                         with open(repo_marker, "r") as f:
                             existing_url = f.read().strip()
-                        if existing_url == selected_url:
-                            print(f"✅ Repository already cloned: {selected_url}")
-                            need_clone = False
-                        else:
-                            print("🔄 Different repo detected, removing old...")
-                            shutil.rmtree(code_path, onerror=remove_readonly)
                     except Exception as e:
-                        print(f"⚠️  Could not read repo marker: {e}")
-                        shutil.rmtree(code_path, onerror=remove_readonly)
+                        rprint(f"⚠️  Could not read repo marker: {e}")
+                
+                paper_id_marker = os.path.join(code_path, ".paper_id")
+                if os.path.exists(paper_id_marker):
+                    try:
+                        with open(paper_id_marker, "r") as f:
+                            existing_paper_id = f.read().strip()
+                    except Exception:
+                        pass
+                
+                # Decide what to do with the existing folder
+                if existing_url == selected_url and (existing_paper_id == "unknown" or existing_paper_id == arxiv_id):
+                    rprint(f"✅ Repository already cloned: {selected_url}")
+                    need_clone = False
                 else:
-                    print("🗑️  No repo marker found, removing directory...")
-                    shutil.rmtree(code_path, onerror=remove_readonly)
+                    # Rename instead of delete so we don't lose old work
+                    rename_target = f"{code_path}_{existing_paper_id}"
+                    
+                    # If the rename target somehow already exists, append a timestamp
+                    if os.path.exists(rename_target):
+                        import time
+                        rename_target += f"_{int(time.time())}"
+                        
+                    rprint(f"🔄 Different repo detected. Renaming existing folder to {os.path.basename(rename_target)}...")
+                    try:
+                        os.rename(code_path, rename_target)
+                    except Exception as e:
+                        rprint(f"⚠️  Could not rename folder (might be open in another program): {e}")
+                        rprint("🗑️  Falling back to removing directory...")
+                        shutil.rmtree(code_path, onerror=remove_readonly)
 
             if need_clone:
-                print(f"📥 Cloning repository from {selected_url}...")
+                rprint(f"📥 Cloning repository from {selected_url}...")
                 try:
                     result = subprocess.run(
                         ["git", "clone", selected_url, code_path],
@@ -1394,13 +1541,20 @@ class PaperReproductionOrchestrator:
                         timeout=300,
                     )
                     if result.returncode == 0:
-                        print(f"✅ Successfully cloned repository to {code_path}")
+                        rprint(f"✅ Successfully cloned repository to {code_path}")
                         # Store repo URL marker
                         with open(repo_marker, "w") as f:
                             f.write(selected_url)
+                        
+                        # Store paper ID marker
+                        paper_id_marker = os.path.join(code_path, ".paper_id")
+                        if arxiv_id:
+                            with open(paper_id_marker, "w") as f:
+                                f.write(arxiv_id)
+                                
                         state["implementation_path"] = code_path
                     else:
-                        print(f"⚠️  Clone failed: {result.stderr}")
+                        rprint(f"⚠️  Clone failed: {result.stderr}")
                         state["messages"].append("Clone failed")
                         state["final_status"] = "Failed: Could not clone repository"
                         self.metrics_tracker.end_phase(
@@ -1408,7 +1562,7 @@ class PaperReproductionOrchestrator:
                         )
                         return state
                 except Exception as e:
-                    print(f"⚠️  Clone error: {str(e)}")
+                    rprint(f"⚠️  Clone error: {str(e)}")
                     state["final_status"] = f"Failed: Clone error - {str(e)}"
                     self.metrics_tracker.end_phase("decide_and_clone", success=False)
                     return state
@@ -1425,7 +1579,7 @@ class PaperReproductionOrchestrator:
         # No implementation found
         state["final_status"] = "Failed: No implementation found"
         state["messages"].append("❌ No implementation found")
-        print("❌ Discovery Agent found no suitable implementation")
+        rprint("❌ Discovery Agent found no suitable implementation")
 
         # Save checkpoint even on failure
         self._save_checkpoint(state, "decide_and_clone", success=False)
@@ -1442,19 +1596,19 @@ class PaperReproductionOrchestrator:
         if self._is_phase_completed(state, "environment_setup"):
             # Validate checkpoint before skipping - ensure environment actually exists
             if self._validate_environment_checkpoint(state):
-                print("⏭️  Skipping environment_setup (already completed from checkpoint)")
+                rprint("⏭️  Skipping environment_setup (already completed from checkpoint)")
                 # CRITICAL FIX: Ensure phase_status is consistent even when skipping
                 # This repairs state where completed_phases has it but phase_status doesn't
                 phase_status = state.get("phase_status", {})
                 if phase_status.get("environment") != "completed":
-                    print("   ⚠️  Repairing phase hierarchy: marking environment as completed")
+                    rprint("   ⚠️  Repairing phase hierarchy: marking environment as completed")
                     phase_status["environment"] = "completed"
                     state["phase_status"] = phase_status
                 return state
             # If validation failed, phase was invalidated - continue to re-run
 
         self.metrics_tracker.start_phase("environment_setup")
-        print("🔧 Setting up environment...")
+        rprint("🔧 Setting up environment...")
 
         code_path = state.get("implementation_path") or "./cloned_repo"
 
@@ -1469,7 +1623,7 @@ class PaperReproductionOrchestrator:
             with open(readme_path, "r", encoding="utf-8") as f:
                 readme_content = f.read()
         except FileNotFoundError:
-            print("⚠️  No README.md found, will analyze environment files directly")
+            rprint("⚠️  No README.md found, will analyze environment files directly")
             readme_content = "No README found. Analyze environment files directly."
 
         # Run environment setup agent
@@ -1495,7 +1649,7 @@ class PaperReproductionOrchestrator:
             state["phase_status"] = phase_status
 
             state["messages"].append("✅ Environment setup successful")
-            print(f"✅ Environment ready: {env_result.get('env_name', 'Unknown')}")
+            rprint(f"✅ Environment ready: {env_result.get('env_name', 'Unknown')}")
 
             # Save environment info for unified_reproduction to use
             if "agent_contexts" not in state:
@@ -1519,7 +1673,7 @@ class PaperReproductionOrchestrator:
             )
         else:
             state["messages"].append("❌ Environment setup failed")
-            print(
+            rprint(
                 f"❌ Environment setup failed: {env_result.get('error', 'Unknown error')}"
             )
 
@@ -1528,7 +1682,7 @@ class PaperReproductionOrchestrator:
             
             # Use Supervisor's intelligent LLM classifier
             error_class = self.supervisor_agent.classify_error(error_msg)
-            print(f"   🧠 Error classified as: {error_class}")
+            rprint(f"   🧠 Error classified as: {error_class}")
             
             if error_class == "DATA":
                 # This is a data issue (smoke test failed due to missing data)
@@ -1567,7 +1721,7 @@ class PaperReproductionOrchestrator:
         """Run unified reproduction workflow."""
         # Check if this phase was already completed (resuming from checkpoint)
         if self._is_phase_completed(state, "unified_reproduction"):
-            print(
+            rprint(
                 "⏭️  Skipping unified_reproduction (already completed from checkpoint)"
             )
             return state
@@ -1578,12 +1732,12 @@ class PaperReproductionOrchestrator:
         # NEW: Check for existing results/checkpoints in the repo BEFORE running experiments
         existing_results = self.discovery_agent.check_existing_results(code_path)
         if existing_results.get("has_results"):
-            print("\n" + "=" * 60)
-            print("🎯 EXISTING RESULTS FOUND - Skipping to verification!")
-            print("=" * 60)
-            print(f"   Result files: {existing_results.get('result_files', [])[:3]}")
-            print(f"   Checkpoints: {existing_results.get('checkpoints', [])[:3]}")
-            print("=" * 60 + "\n")
+            rprint("\n" + "=" * 60)
+            rprint("🎯 EXISTING RESULTS FOUND - Skipping to verification!")
+            rprint("=" * 60)
+            rprint(f"   Result files: {existing_results.get('result_files', [])[:3]}")
+            rprint(f"   Checkpoints: {existing_results.get('checkpoints', [])[:3]}")
+            rprint("=" * 60 + "\n")
 
             # Mark as successful and skip to verification
             state["env_setup_results"] = {
@@ -1613,7 +1767,7 @@ class PaperReproductionOrchestrator:
             self.metrics_tracker.end_phase("unified_reproduction", success=True)
             return state
 
-        print("🚀 Starting unified reproduction workflow...")
+        rprint("🚀 Starting unified reproduction workflow...")
 
         # Build comprehensive context from paper analysis
         paper_context_parts = []
@@ -1651,7 +1805,7 @@ class PaperReproductionOrchestrator:
 
         # FLUSH DEFERRED EMBEDDINGS BEFORE SUPERVISOR/REPRODUCTION STARTS
         if self.hierarchical_context:
-            print("   🧠 Flushing deferred context embeddings...")
+            rprint("   🧠 Flushing deferred context embeddings...")
             self.hierarchical_context.flush_embeddings()
 
         # Run unified reproduction
@@ -1702,38 +1856,38 @@ class PaperReproductionOrchestrator:
         # Add messages
         if result["setup_successful"]:
             state["messages"].append("✅ Environment setup successful")
-            print("✅ Environment setup successful")
+            rprint("✅ Environment setup successful")
         else:
             state["messages"].append("❌ Environment setup failed")
-            print("❌ Environment setup failed")
+            rprint("❌ Environment setup failed")
 
         if result["data_successful"]:
             state["messages"].append("✅ Datasets prepared successfully")
-            print("✅ Datasets prepared")
+            rprint("✅ Datasets prepared")
         elif result["data_manual_steps"]:
             state["messages"].append("⚠️  Manual dataset steps required")
-            print("⚠️  Manual dataset steps required")
+            rprint("⚠️  Manual dataset steps required")
 
         if result["main_experiment_successful"]:
             state["messages"].append("✅ Experiments executed successfully")
-            print("✅ Experiments executed successfully")
+            rprint("✅ Experiments executed successfully")
         elif result["sanity_check_passed"]:
             state["messages"].append(
                 "⚠️  Sanity check passed but main experiment failed"
             )
-            print("⚠️  Sanity check passed but main experiment failed")
+            rprint("⚠️  Sanity check passed but main experiment failed")
         else:
             state["messages"].append("❌ Experiments failed")
-            print("❌ Experiments failed")
+            rprint("❌ Experiments failed")
 
         # Print summary
-        print("\n📊 Unified Reproduction Summary:")
-        print(
+        rprint("\n📊 Unified Reproduction Summary:")
+        rprint(
             f"   READMEs consulted: {', '.join(result['readmes_consulted']) if result['readmes_consulted'] else 'None'}"
         )
-        print(f"   Setup: {'✅' if result['setup_successful'] else '❌'}")
-        print(f"   Data: {'✅' if result['data_successful'] else '⚠️'}")
-        print(
+        rprint(f"   Setup: {'✅' if result['setup_successful'] else '❌'}")
+        rprint(f"   Data: {'✅' if result['data_successful'] else '⚠️'}")
+        rprint(
             f"   Experiments: {'✅' if result['main_experiment_successful'] else '❌'}"
         )
 
@@ -1763,11 +1917,11 @@ class PaperReproductionOrchestrator:
         """
         # Check if this phase was already completed (resuming from checkpoint)
         if self._is_phase_completed(state, "extract_and_verify"):
-            print("⏭️  Skipping extract_and_verify (already completed from checkpoint)")
+            rprint("⏭️  Skipping extract_and_verify (already completed from checkpoint)")
             return state
 
         self.metrics_tracker.start_phase("extract_and_verify")
-        print("📊 Summarizing verification results...")
+        rprint("📊 Summarizing verification results...")
 
         experiment_results = state.get("experiment_results", {})
         dependencies_installed = state.get("dependencies_installed", False)
@@ -1856,7 +2010,7 @@ class PaperReproductionOrchestrator:
         }
         state["results_match"] = results_match
 
-        print(f"\n📝 Verification Report:\n{report_text}\n")
+        rprint(f"\n📝 Verification Report:\n{report_text}\n")
         state["messages"].append(status_msg)
 
         # Save checkpoint after verification
@@ -1871,13 +2025,13 @@ class PaperReproductionOrchestrator:
         """Generate final report."""
         # If workflow is paused for user input, skip report generation
         if state.get("final_status") == "waiting_for_user_input":
-            print("⏸️  Workflow paused for user input — skipping report generation")
+            rprint("⏸️  Workflow paused for user input — skipping report generation")
             return state
 
         # Note: We always regenerate the report even when resuming, to ensure it's up-to-date
         # But we still mark it as completed for tracking purposes
         self.metrics_tracker.start_phase("generate_report")
-        print("📊 Generating final report...")
+        rprint("📊 Generating final report...")
 
         # Determine final status
         success_level = state.get("verification_results", {}).get(
@@ -1978,7 +2132,7 @@ class PaperReproductionOrchestrator:
 
 ## Status
 {state.get('final_status', 'Complete')}
-
+{self._build_generalization_report_section(state)}
 ## Summary
 {chr(10).join(unique_messages)}
 """
@@ -1987,6 +2141,49 @@ class PaperReproductionOrchestrator:
 
         self.metrics_tracker.end_phase("generate_report", success=True)
         return state
+
+    def _print_langsmith_cost(self):
+        """Fetch and print actual cost from LangSmith if tracing is enabled."""
+        if os.getenv("LANGCHAIN_TRACING_V2", "").lower() != "true":
+            return
+        try:
+            from langsmith import Client
+            client = Client()
+            project = os.getenv("LANGCHAIN_PROJECT", "paper-reproduction-agent")
+            runs = client.list_runs(project_name=project, is_root=True, limit=1)
+            run = next(runs, None)
+            if run and hasattr(run, "total_cost") and run.total_cost:
+                estimated = self.metrics_tracker.estimate_cost()
+                rprint(f"\n📊 LangSmith Actual Cost: ${run.total_cost:.4f} (estimated: ${estimated:.4f})")
+            else:
+                rprint("\n📊 LangSmith: tracing enabled but no cost data available yet")
+        except Exception as e:
+            rprint(f"\n📊 LangSmith cost fetch failed: {e}")
+
+    def _build_generalization_report_section(self, state: PaperReproductionState) -> str:
+        """Build the generalization section for the report (empty if not run)."""
+        gen_results = state.get("generalization_results")
+        if not gen_results:
+            return ""
+
+        gen_success = state.get("generalization_success", False)
+        external_ds = gen_results.get("external_dataset", "N/A")
+        status = "PASSED" if gen_success else "FAILED"
+
+        # Extract the last part of the report (table + conclusion)
+        report_excerpt = gen_results.get("generalization_report", "")
+        # Get last 500 chars which should contain the comparison table
+        if len(report_excerpt) > 500:
+            report_excerpt = "..." + report_excerpt[-500:]
+
+        return f"""
+## Generalization Gap Analysis
+- External Dataset: {external_ds}
+- Generalization Status: {'✅' if gen_success else '❌'} {status}
+- Novel method {'outperforms' if gen_success else 'does NOT outperform'} baselines on external data
+
+{report_excerpt}
+"""
 
     def _route_after_clone(
         self, state: PaperReproductionState
@@ -2002,7 +2199,7 @@ class PaperReproductionOrchestrator:
         """Route after environment setup."""
         if state.get("dependencies_installed", False):
             return "continue"
-        print("🛑 Routing to report generation due to environment setup failure")
+        rprint("🛑 Routing to report generation due to environment setup failure")
         return "failed"
 
     def _route_after_reproduction(
@@ -2016,15 +2213,15 @@ class PaperReproductionOrchestrator:
         )
 
         if not setup_success:
-            print("🛑 Routing to report generation due to setup failure")
+            rprint("🛑 Routing to report generation due to setup failure")
             state["final_status"] = "Failed: Environment setup failed"
             return "failed"
 
         if experiments_completed or sanity_check_passed:
-            print("✅ Routing to metrics extraction")
+            rprint("✅ Routing to metrics extraction")
             return "continue"
 
-        print("⚠️  No experiments run, but continuing to metrics extraction")
+        rprint("⚠️  No experiments run, but continuing to metrics extraction")
         return "continue"
 
     def _is_phase_completed(self, state: PaperReproductionState, phase: str) -> bool:
@@ -2052,8 +2249,8 @@ class PaperReproductionOrchestrator:
         if phase in completed:
             completed.remove(phase)
             state["completed_phases"] = completed
-            print(f"⚠️  Invalidated checkpoint for '{phase}': {reason}")
-            print("   Phase will be re-run instead of skipped.")
+            rprint(f"⚠️  Invalidated checkpoint for '{phase}': {reason}")
+            rprint("   Phase will be re-run instead of skipped.")
 
     def _validate_execution_checkpoint(self, state: PaperReproductionState) -> bool:
         """Validate that execution checkpoint has actual results.
@@ -2253,7 +2450,7 @@ class PaperReproductionOrchestrator:
         Returns:
             Final state with verification results
         """
-        print("📊 Running verification-only mode with code-first approach...")
+        rprint("📊 Running verification-only mode with code-first approach...")
 
         # Step 1: Try to get paper results from existing checkpoint
         paper_title = paper_input
@@ -2268,7 +2465,7 @@ class PaperReproductionOrchestrator:
                 paper_results = state.get("paper_results", {})
                 paper_title = state.get("paper_title", paper_input)
                 if paper_results:
-                    print(
+                    rprint(
                         f"✅ Found paper results from checkpoint: {paper_title[:60]}..."
                     )
 
@@ -2277,16 +2474,16 @@ class PaperReproductionOrchestrator:
             try:
                 if paper_input.startswith("arxiv:") or "." in paper_input:
                     arxiv_id = paper_input.replace("arxiv:", "")
-                    print(f"📄 Fetching paper info for {arxiv_id}...")
+                    rprint(f"📄 Fetching paper info for {arxiv_id}...")
 
                     import arxiv
 
                     search = arxiv.Search(id_list=[arxiv_id])
                     paper = next(search.results())
                     paper_title = paper.title
-                    print(f"   Title: {paper_title[:60]}...")
+                    rprint(f"   Title: {paper_title[:60]}...")
             except Exception as e:
-                print(f"⚠️ Could not fetch paper info: {e}")
+                rprint(f"⚠️ Could not fetch paper info: {e}")
 
         # Step 3: Build initial state for verification
 
@@ -2320,7 +2517,7 @@ Do NOT assume any particular format - explore and adapt.
 Begin verification now."""
 
         # Step 5: Run agent for verification
-        print("\n🤖 Running unified reproduction agent for verification...")
+        rprint("\n🤖 Running unified reproduction agent for verification...")
         agent_result = self.unified_reproducer.reproduce(
             code_path=repo_path, paper_context=verification_prompt
         )
@@ -2375,9 +2572,9 @@ Begin verification now."""
             "report": agent_result.get("output", ""),
         }
 
-        print(f"\n{'='*60}")
-        print(f"{'✅' if match_success else '⚠️'} Verification Complete")
-        print(f"{'='*60}\n")
+        rprint(f"\n{'='*60}")
+        rprint(f"{'✅' if match_success else '⚠️'} Verification Complete")
+        rprint(f"{'='*60}\n")
 
         return final_state
 
@@ -2505,12 +2702,13 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
         if repo_path is None:
             repo_path = self.config.repo_path
         if not self.checkpoint_manager:
-            print("⚠️ Checkpoint manager is None!")
+            rprint("⚠️ Checkpoint manager is None!")
             return {}
 
-        print(f"🔍 DEBUG: Attempting resume for '{paper_input}'")
-        print(f"🔍 DEBUG: Repo Path: '{repo_path}'")
-        print(f"🔍 DEBUG: Checkpoint Dir: '{self.checkpoint_manager.checkpoint_dir}'")
+        console = Console()
+        console.print(f"🔍 [bold cyan]DEBUG:[/bold cyan] Attempting resume for [bold]'{paper_input}'[/bold]")
+        console.print(f"🔍 [bold cyan]DEBUG:[/bold cyan] Repo Path: [bold]'{repo_path}'[/bold]")
+        console.print(f"🔍 [bold cyan]DEBUG:[/bold cyan] Checkpoint Dir: [bold]'{self.checkpoint_manager.checkpoint_dir}'[/bold]")
         
         # 1. Try exact match first
         checkpoint_data = self.checkpoint_manager.resume(
@@ -2520,7 +2718,7 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
         # 2. Fallback: Search by Paper ID directly if exact match fails
         # This handles cross-platform path issues (WSL vs Windows)
         if not checkpoint_data:
-            print(f"📋 Exact match failed. Searching for checkpoints by paper ID: {paper_input}")
+            rprint(f"📋 Exact match failed. Searching for checkpoints by paper ID: {paper_input}")
             # Normalize paper ID
             search_id = paper_input.replace("arxiv:", "").strip()
             
@@ -2532,19 +2730,19 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                 latest_match = max(matches, key=lambda x: x[1]["timestamp"])
                 checkpoint_path, data = latest_match
                 
-                print(f"✅ Found cross-platform match: {checkpoint_path.name}")
-                print(f"   Original Path: {data.get('repo_path')}")
-                print(f"   Current Path : {repo_path}")
+                rprint(f"✅ Found cross-platform match: {checkpoint_path.name}")
+                rprint(f"   Original Path: {data.get('repo_path')}")
+                rprint(f"   Current Path : {repo_path}")
                 
                 # Check if paths are reasonably similar (same leaf directory)
                 orig_name = os.path.basename(data.get('repo_path', '').rstrip('/\\'))
                 curr_name = os.path.basename(repo_path.rstrip('/\\'))
                 
                 if orig_name == curr_name:
-                    print("   Repo directory names match, resuming...")
+                    rprint("   Repo directory names match, resuming...")
                     checkpoint_data = data
                 else:
-                    print(f"   ⚠️ Repo names differ ({orig_name} vs {curr_name}) - proceeding with caution")
+                    rprint(f"   ⚠️ Repo names differ ({orig_name} vs {curr_name}) - proceeding with caution")
                     checkpoint_data = data
 
         if checkpoint_data:
@@ -2552,7 +2750,7 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
             
             # Critical: Ensure state has correct current paths
             if repo_path and repo_path != state.get("implementation_path"):
-                print(f"   🔄 Updating implementation path to current: {repo_path}")
+                Console().print(f"   🔄 [yellow]Updating implementation path to current: {repo_path}[/yellow]")
                 state["implementation_path"] = repo_path
 
             # Restore hierarchical context if available
@@ -2567,12 +2765,12 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                     if self._embedder:
                         self.hierarchical_context._embedder = self._embedder
                         self.hierarchical_context._embedder_provided = True
-                        print("   🔌 Re-attached API embedder to restored context")
+                        Console().print("   🔌 [green]Re-attached API embedder to restored context[/green]")
                     stats = self.hierarchical_context.get_stats()
-                    print(f"   🧠 Restored hierarchical context: "
+                    Console().print(f"   🧠 [blue]Restored hierarchical context:[/blue] "
                           f"hot={stats['hot_entries']}, cold={stats['cold_summaries']}")
                 except Exception as e:
-                    print(f"   ⚠️ Failed to restore hierarchical context: {e}")
+                    Console().print(f"   ⚠️ [red]Failed to restore hierarchical context: {e}[/red]")
                     # Continue with fresh context - non-fatal
 
             # Restore metrics tracker if available
@@ -2594,21 +2792,20 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                         self.metrics_tracker.metrics.total_llm_tokens_input +
                         self.metrics_tracker.metrics.total_llm_tokens_output
                     )
-                    print(f"   💰 Restored metrics: ${cost:.4f} cost, {tokens:,} tokens")
+                    Console().print(f"   💰 [green]Restored metrics: ${cost:.4f} cost, {tokens:,} tokens[/green]")
                 except Exception as e:
-                    print(f"   ⚠️ Failed to restore metrics: {e}")
+                    Console().print(f"   ⚠️ [red]Failed to restore metrics: {e}[/red]")
                     # Continue with fresh tracker - non-fatal
 
             completed_phases = state.get("completed_phases", [])
 
-            print("\n♻️  RESUMING FROM CHECKPOINT")
-            print(f"   Last phase: {checkpoint_data['phase']}")
-            print(f"   Saved at: {checkpoint_data['timestamp']}")
+            resume_text = f"Last phase: [bold]{checkpoint_data['phase']}[/bold]\nSaved at: {checkpoint_data['timestamp']}"
             if completed_phases:
-                print("   ✅ Completed phases that will be SKIPPED:")
+                resume_text += "\n\n✅ [green]Completed phases that will be SKIPPED:[/green]"
                 for phase in completed_phases:
-                    print(f"      - {phase}")
-            print()
+                    resume_text += f"\n   - {phase}"
+            
+            Console().print(Panel(resume_text, title="♻️  RESUMING FROM CHECKPOINT", border_style="green", expand=False))
             return state
 
         return {}
@@ -2624,9 +2821,9 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
         Returns:
             Final state with results
         """
-        print(f"\n{'='*60}")
-        print("🚀 Starting Paper Reproduction Workflow (Clean)")
-        print(f"{'='*60}\n")
+        rprint(f"\n{'='*60}")
+        rprint("🚀 Starting Paper Reproduction Workflow (Clean)")
+        rprint(f"{'='*60}\n")
 
         # Start metrics tracking
         self.metrics_tracker.start_workflow()
@@ -2636,30 +2833,30 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
             self.checkpoint_manager.clear(
                 repo_path=self.config.repo_path, paper_id=paper_input
             )
-            print("🗑️  Cleared existing checkpoints\n")
+            rprint("🗑️  Cleared existing checkpoints\n")
 
         # FIRST: Check if cloned_repo already has results (before anything else!)
         repo_path = self.config.repo_path
         if os.path.exists(repo_path):
             existing_results = self._check_existing_results(repo_path)
             if existing_results.get("has_results"):
-                print("\n" + "=" * 60)
-                print("🎯 EXISTING RESULTS DETECTED IN REPOSITORY!")
-                print("=" * 60)
-                print(f"   📁 Repository: {repo_path}")
-                print(
+                rprint("\n" + "=" * 60)
+                rprint("🎯 EXISTING RESULTS DETECTED IN REPOSITORY!")
+                rprint("=" * 60)
+                rprint(f"   📁 Repository: {repo_path}")
+                rprint(
                     f"   📊 Result files: {len(existing_results.get('result_files', []))}"
                 )
-                print(
+                rprint(
                     f"   💾 Checkpoints: {len(existing_results.get('checkpoints', []))}"
                 )
-                print(f"   📋 Log files: {len(existing_results.get('log_files', []))}")
+                rprint(f"   📋 Log files: {len(existing_results.get('log_files', []))}")
                 if existing_results.get("result_files"):
                     for f in existing_results["result_files"][:3]:
-                        print(f"      → {f}")
-                print("=" * 60)
-                print("\n⏩ Skipping paper analysis and experiment execution...")
-                print("   Going directly to RESULT VERIFICATION\n")
+                        rprint(f"      → {f}")
+                rprint("=" * 60)
+                rprint("\n⏩ Skipping paper analysis and experiment execution...")
+                rprint("   Going directly to RESULT VERIFICATION\n")
 
                 # Create a minimal state and skip to verification
                 result = self._run_verification_only(
@@ -2667,7 +2864,8 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
                 )
                 # End metrics tracking for verification-only path
                 self.metrics_tracker.end_workflow()
-                print(self.metrics_tracker.get_summary())
+                rprint(Panel(self.metrics_tracker.get_summary(), title="📊 WORKFLOW METRICS SUMMARY", border_style="cyan"))
+                self._print_langsmith_cost()
                 return result
 
         # Try to resume from checkpoint
@@ -2706,7 +2904,7 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
             # Update with resumed state
             initial_state.update(resumed_state)
             completed_count = len(resumed_state.get("completed_phases", []))
-            print(
+            rprint(
                 f"✅ Resumed with {completed_count} completed phase(s), {len(resumed_state.get('messages', []))} messages\n"
             )
         else:
@@ -2745,11 +2943,12 @@ The reproduction {'successfully matched' if summary.get('matched_count', 0) == s
         finally:
             # End metrics tracking and print summary
             self.metrics_tracker.end_workflow()
-            print(self.metrics_tracker.get_summary())
+            rprint(Panel(self.metrics_tracker.get_summary(), title="📊 WORKFLOW METRICS SUMMARY", border_style="cyan"))
+            self._print_langsmith_cost()
 
-        print(f"\n{'='*60}")
-        print("✅ Workflow Complete")
-        print(f"{'='*60}\n")
+        rprint(f"\n{'='*60}")
+        rprint("✅ Workflow Complete")
+        rprint(f"{'='*60}\n")
 
         # Close the log file if logging is enabled
         if self.file_logger:

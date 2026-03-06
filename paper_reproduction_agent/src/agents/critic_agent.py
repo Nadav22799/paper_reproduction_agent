@@ -12,7 +12,6 @@ import os
 import json
 from datetime import datetime
 from typing import Dict, List, Tuple
-from langchain_google_genai import ChatGoogleGenerativeAI
 from ..utils.tool_guard import FORBIDDEN_PATTERNS
 
 
@@ -46,13 +45,14 @@ class CriticAgent:
         "create_python_file",
     ]
 
-    def __init__(self, metrics_tracker=None, enable_llm_critic: bool = False, callbacks=None, storage=None):
+    def __init__(self, metrics_tracker=None, enable_llm_critic: bool = False, callbacks=None, storage=None, llm=None):
         """Initialize the Critic Agent.
 
         Args:
             metrics_tracker: Optional metrics tracker for observability
             enable_llm_critic: Whether to use LLM for deep inspection
             storage: Optional StorageProvider for persisting critic inspection logs
+            llm: Optional pre-configured LLM instance (weak tier). Falls back to factory.
         """
         self.metrics_tracker = metrics_tracker
         self.blocked_count = 0
@@ -60,18 +60,17 @@ class CriticAgent:
         self.llm_inspections = 0
         self.enable_llm_critic = enable_llm_critic
         self.callbacks = callbacks or []
-        self._llm = None  # Lazy init
+        self._injected_llm = llm  # Pre-configured from orchestrator
+        self._llm = None  # Lazy init fallback
         self._storage = storage
 
     def _get_llm(self):
-        """Lazy initialize cheap LLM for deep inspection."""
+        """Return injected LLM if provided, else lazy-init via factory."""
+        if self._injected_llm is not None:
+            return self._injected_llm
         if self._llm is None:
-            # Use cheapest available model
-            self._llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash-exp",
-                temperature=0,
-                max_tokens=200,  # Short response needed
-            )
+            from ..utils.llm_factory import create_llm
+            self._llm = create_llm(temperature=0, include_thoughts=False, tier="weak")
         return self._llm
 
     def inspect_action(self, state: Dict) -> Dict:

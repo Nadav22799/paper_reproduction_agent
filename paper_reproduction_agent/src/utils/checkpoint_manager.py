@@ -5,6 +5,8 @@ preventing loss of work when long experiments timeout or crash.
 """
 
 import json
+import os
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -51,17 +53,37 @@ class ExperimentCheckpoint:
         safe_phase = phase.replace("/", "_").replace(" ", "_")
         return self.checkpoint_dir / f"{experiment_id}_{safe_phase}.json"
 
+    @staticmethod
+    def _normalize_paper_id(paper_id: str) -> str:
+        """Normalize paper ID to bare arXiv ID regardless of input format.
+
+        Handles:
+          - bare IDs:          "2309.11295" or "2309.11295v2"
+          - arxiv: prefix:     "arxiv:2309.11295"
+          - arXiv URLs:        "https://arxiv.org/abs/2309.11295v2"
+                               "https://arxiv.org/pdf/2309.11295"
+                               "https://arxiv.org/html/2309.11295v2"
+        """
+        if not paper_id:
+            return ""
+        if "arxiv.org" in paper_id:
+            m = re.search(r"(\d{4}\.\d{4,5}(?:v\d+)?)", paper_id)
+            if m:
+                return m.group(1)
+        return paper_id.replace("arxiv:", "").strip()
+
     def _generate_experiment_id(self, repo_path: str, paper_id: str = "") -> str:
         """Generate unique experiment ID based on repo path and paper.
 
         Args:
             repo_path: Path to repository
-            paper_id: Optional paper identifier
+            paper_id: Optional paper identifier (any supported format)
 
         Returns:
             Unique experiment ID
         """
-        content = f"{repo_path}_{paper_id}".encode()
+        normalized = self._normalize_paper_id(paper_id)
+        content = f"{repo_path}_{normalized}".encode()
         return hashlib.md5(content).hexdigest()[:12]
 
     def save(
@@ -96,7 +118,9 @@ class ExperimentCheckpoint:
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint_data, f, indent=2)
 
-            temp_path.rename(checkpoint_path)
+            # os.replace() is atomic on both Unix and Windows (unlike Path.rename()
+            # which raises WinError 183 on Windows if the destination already exists)
+            os.replace(str(temp_path), str(checkpoint_path))
 
             # Calculate checkpoint size
             size_kb = checkpoint_path.stat().st_size / 1024
@@ -133,13 +157,15 @@ class ExperimentCheckpoint:
                     with open(checkpoint_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     checkpoints.append((checkpoint_file, data))
-                except Exception:
+                except Exception as e:
+                    print(f"⚠️  Error reading checkpoint {checkpoint_file.name}: {e}")
                     continue
 
             # If no exact match, try flexible search by paper_id
             if not checkpoints and paper_id:
-                print(
-                    f"📋 No exact match for {experiment_id}, searching by paper ID..."
+                from rich import print as rprint
+                rprint(
+                    f"📋 [yellow]No exact match for {experiment_id}, searching by paper ID...[/yellow]"
                 )
                 checkpoints = self._search_by_paper_id(paper_id)
 
@@ -151,14 +177,17 @@ class ExperimentCheckpoint:
             latest_checkpoint = max(checkpoints, key=lambda x: x[1]["timestamp"])
             checkpoint_path, checkpoint_data = latest_checkpoint
 
-            print(f"📂 Resuming from checkpoint: {checkpoint_data['phase']}")
-            print(f"   Saved at: {checkpoint_data['timestamp']}")
-            print(f"   File: {checkpoint_path}")
+            from rich import print as rprint
+            rprint(f"📂 [bold cyan]Resuming from checkpoint:[/bold cyan] {checkpoint_data['phase']}")
+            rprint(f"   Saved at: {checkpoint_data['timestamp']}")
+            rprint(f"   File: {checkpoint_path}")
 
             return checkpoint_data
 
         except Exception as e:
+            import traceback
             print(f"⚠️  Failed to resume from checkpoint: {e}")
+            traceback.print_exc()
             return None
 
     def _search_by_paper_id(self, paper_id: str) -> List[tuple]:
@@ -175,8 +204,8 @@ class ExperimentCheckpoint:
         """
         checkpoints = []
 
-        # Normalize paper_id for comparison
-        normalized_paper_id = paper_id.replace("arxiv:", "").strip()
+        # Normalize paper_id — handles bare IDs, arxiv: prefix, and full URLs
+        normalized_paper_id = self._normalize_paper_id(paper_id)
 
         for checkpoint_file in self.checkpoint_dir.glob("*.json"):
             try:
@@ -209,7 +238,8 @@ class ExperimentCheckpoint:
                 if arxiv_id == normalized_paper_id:
                     checkpoints.append((checkpoint_file, data))
 
-            except Exception:
+            except Exception as e:
+                print(f"⚠️  Error searching checkpoint {checkpoint_file.name}: {e}")
                 continue
 
         if checkpoints:

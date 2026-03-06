@@ -235,7 +235,7 @@ def _ask_user_approval(tool_name: str, content: str, reason: str) -> Tuple[bool,
     """Pause and ask the user for approval in critic mode.
 
     If a callback is registered (e.g. WebApprovalCallback), delegates to it.
-    Otherwise falls back to CLI ``input()``.
+    Otherwise falls back to CLI using questionary.
 
     Returns:
         (approved, feedback) — approved=True means execute.
@@ -244,19 +244,31 @@ def _ask_user_approval(tool_name: str, content: str, reason: str) -> Tuple[bool,
         return _approval_callback.request_approval(tool_name, content, reason)
 
     # CLI fallback
-    print(f"\n{'='*60}")
-    print(f"  CRITIC ALERT: {reason}")
-    print(f"{'='*60}")
-    print(f"  Tool: {tool_name}")
-    print(f"  Command: {content[:300]}")
+    from rich.panel import Panel
+    from rich.console import Console
+    import questionary
+    
+    console = Console()
+    
+    alert_text = f"Tool: {tool_name}\n"
+    alert_text += f"Reason: {reason}\n"
+    alert_text += f"Command:\n{content[:300]}"
     if len(content) > 300:
-        print(f"  ... ({len(content) - 300} more chars)")
-    print()
+        alert_text += f"\n... ({len(content) - 300} more chars)"
+        
+    console.print(Panel(alert_text, title="🚨 CRITIC ALERT", border_style="red"))
+    
     try:
-        approval = input("  Approve execution? [y/N]: ").strip().lower()
+        approval = questionary.confirm("Approve execution?", default=False).ask()
+        feedback = ""
+        if not approval:
+            # If rejected, invite the human to provide feedback to the agent
+            feedback = questionary.text("Provide feedback to the agent (optional):").ask()
     except (EOFError, KeyboardInterrupt):
-        approval = "n"
-    return (approval == "y", "")
+        approval = False
+        feedback = ""
+        
+    return (approval, feedback or "")
 
 
 def guard_tools(tools: list, mode: str = "auto") -> list:

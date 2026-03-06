@@ -69,10 +69,11 @@ class UnifiedReproductionAgent:
         self.resources = detect_system_resources()
         self.experiment_strategy = get_experiment_strategy(self.resources)
 
-        print("\n" + "=" * 60)
-        print(get_resource_summary(self.resources))
-        print(f"   Experiment Strategy: {self.experiment_strategy.upper()}")
-        print("=" * 60)
+        from rich.console import Console
+        from rich.panel import Panel
+        summary_raw = get_resource_summary(self.resources)
+        content = f"{summary_raw}\n   Experiment Strategy: {self.experiment_strategy.upper()}"
+        Console().print(Panel(content, title="💻 System Resources Detected", border_style="cyan", expand=False))
 
         self.system_prompt = """You are an Expert AI Engineer specializing in reproducing machine learning research papers. Your task is to follow repository instructions precisely to validate published results.
 

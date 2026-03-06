@@ -52,8 +52,8 @@ class DataPrepAgent:
         self.hierarchical_context = hierarchical_context
         self.callbacks = callbacks or []
 
-        from ..config.prompts import DATA_PREP_AGENT_PROMPT
-        self.system_prompt = DATA_PREP_AGENT_PROMPT
+        from ..config.prompts import DATA_PREP_AGENT_PROMPT, EFFICIENCY_RULES
+        self.system_prompt = DATA_PREP_AGENT_PROMPT.replace("{efficiency_rules}", EFFICIENCY_RULES)
 
         # Wrap DuckDuckGo so network failures return an error string instead of crashing
         _ddg = DuckDuckGoSearchRun()
@@ -68,10 +68,9 @@ class DataPrepAgent:
             _ddg,  # for NEEDS_DISCOVERY dataset lookup
         ]
 
-        print("\n" + "=" * 60)
-        print("Data Preparation Agent Initialized")
-        print(f"   Max Iterations: {max_iterations}")
-        print("=" * 60)
+        from rich.console import Console
+        from rich.panel import Panel
+        Console().print(Panel(f"Max Iterations: {max_iterations}", title="Data Preparation Agent Initialized", border_style="cyan", expand=False))
 
     def prepare_data(self, state: Dict) -> Dict:
         """Prepare datasets for experiments.

@@ -65,8 +65,11 @@ class TeeOutput:
         self.log_file = open(log_file, "w", encoding="utf-8")
 
     def write(self, message):
+        import re
         self.terminal.write(message)
-        self.log_file.write(message)
+        # Strip ANSI escape codes (colors, formatting) before writing to file
+        clean_text = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', message)
+        self.log_file.write(clean_text)
         self.log_file.flush()
 
     def flush(self):
@@ -75,3 +78,9 @@ class TeeOutput:
 
     def close(self):
         self.log_file.close()
+
+    def isatty(self):
+        return hasattr(self.terminal, 'isatty') and self.terminal.isatty()
+
+    def fileno(self):
+        return self.terminal.fileno()

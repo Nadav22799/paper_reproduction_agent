@@ -21,7 +21,9 @@ from ..tools.file_utils import grep_in_directory, find_files
 from langchain_community.tools import DuckDuckGoSearchRun
 from ..utils.llm_factory import create_llm
 from ..utils.hierarchical_context import HierarchicalContextManager
-
+from rich import print as rprint
+from rich.panel import Panel
+from rich.console import Console
 
 class PlanningAgent:
     """Creates upfront reproduction plan based on README analysis."""
@@ -88,6 +90,8 @@ class PlanningAgent:
 
     def _setup_prompt_and_tools(self):
         """Set up system prompt and tools (called from __init__)."""
+        from ..config.prompts import EFFICIENCY_RULES
+
         self.system_prompt = """You are a Planning Specialist for ML paper reproduction.
 
 GOAL: REPRODUCE PAPER RESULTS
@@ -95,6 +99,11 @@ You are part of an automated system designed to reproduce the results of a scien
 
 Your job is to create a comprehensive reproduction_checklist.md that guides all subsequent agents.
 
+{efficiency_rules}
+
+""".replace("{efficiency_rules}", EFFICIENCY_RULES)
+
+        self.system_prompt += """
 ⚠️  CRITICAL BOUNDARY RULE ⚠️
 You MUST ONLY access files INSIDE the repository directory provided in the prompt.
 NEVER use relative paths like "../" to navigate outside it.
@@ -267,31 +276,45 @@ After creating the checklist, respond with a summary of what you found.
 PHASE 3: DETECT USER INPUT REQUIREMENTS
 ═══════════════════════════════════════════════════════════════
 
-Based ONLY on the paper, README, and files you already read during Phases 1-2
-(do NOT read additional files or list directories for this — use what you already know),
-quickly determine if reproduction requires ANY of:
-- API keys for LLM services (OpenAI, HuggingFace tokens, Weights & Biases, Comet ML, etc.)
-- Paid or licensed datasets that require purchase, application, or manual approval
-- Manual account creation or credential setup (e.g., registering on a website)
-- Private model weights requiring authentication tokens
-- Any external resource the system cannot access autonomously
+Based ONLY on info gathered in Phases 1-2 (do NOT read additional files),
+determine if reproduction requires ANY of:
+- API keys (OpenAI, HuggingFace tokens, W&B, Comet ML, etc.)
+- Paid/licensed datasets requiring purchase or manual approval
+- Manual account creation or credentials
+- Private model weights requiring auth tokens
 
-If NOTHING is required, simply skip this section and move on.
+If NOTHING is required, skip this section entirely.
 If user input IS required, add this section to the checklist:
 
 ```markdown
 ## User Input Required
 **Status:** PENDING
 
+**Step-by-step Guide:**
+1. [First action — be specific with URLs, e.g. "Go to https://huggingface.co/settings/tokens"]
+2. [Next action — exact steps to obtain each credential or resource]
+
 **Items:**
-- [ ] {item_name} - Type: {api_key|dataset_access|credentials|other}
-  Description: {what it is and why it's needed}
-  Instructions: {step-by-step how to obtain it}
-  Environment Variable: {VAR_NAME to set, if applicable}
+- [ ] <ITEM_NAME> - Type: <api_key|dataset_access|credentials|other>
+  Description: <what it is and why it's needed>
+  Instructions: <exact steps with URLs>
+  Environment Variable: <VAR_NAME>
+
+**Sensitive Data Storage:**
+For API keys/tokens/credentials, instruct the user to create a `.env` file:
+- Path: <repo_root>/.env
+- Template:
+  # Required for reproduction
+  <VAR_NAME_1>=your_value_here
+  <VAR_NAME_2>=your_value_here
+- The `.env` will be loaded by downstream agents automatically.
+- Document the `.env` path in this checklist so agents can find it.
 ```
 
-Be specific in the instructions — tell the user exactly where to go and what to do.
-If no user input is required, do NOT add this section.
+RULES:
+- Be SPECIFIC — exact URLs, button names, page locations.
+- For credentials: ALWAYS use .env (never ask user to paste secrets in terminal).
+- If no user input is required, do NOT add this section.
 """
 
         # Wrap DuckDuckGo so network failures return an error string instead of crashing the agent
@@ -308,10 +331,7 @@ If no user input is required, do NOT add this section.
             _ddg,
         ]
 
-        print("\n" + "=" * 60)
-        print("Planning Agent Initialized")
-        print(f"   Max Iterations: {self.max_iterations}")
-        print("=" * 60)
+        Console().print(Panel(f"Max Iterations: {self.max_iterations}", title="Planning Agent Initialized", border_style="cyan", expand=False))
 
     def create_plan(self, state: Dict) -> Dict:
         """Create initial reproduction plan from README analysis.
@@ -339,10 +359,10 @@ If no user input is required, do NOT add this section.
         paper_datasets = state.get("experimental_setup", {}).get("datasets", [])
         paper_metrics = paper_results.get("metrics", []) if isinstance(paper_results, dict) else []
 
-        print("📋 Planning Agent: Creating reproduction checklist...")
-        print(f"   📋 Experiment mode: {experiment_mode}")
+        rprint("📋 Planning Agent: Creating reproduction checklist...")
+        rprint(f"   📋 Experiment mode: {experiment_mode}")
         if paper_datasets:
-            print(f"   📋 Datasets from paper: {paper_datasets}")
+            rprint(f"   📋 Datasets from paper: {paper_datasets}")
 
         # RETRIEVE relevant context (paper analysis, previous attempts - exclude own to prevent self-referencing)
         previous_context = ""
@@ -353,14 +373,14 @@ If no user input is required, do NOT add this section.
                 exclude_sources=["planning"],
             )
             if previous_context:
-                print(f"   📋 Retrieved {len(previous_context)} chars of previous context")
+                rprint(f"   📋 Retrieved {len(previous_context)} chars of previous context")
 
         # Select which experiments to include based on mode
         selected_experiments = self._select_experiments_by_mode(
             experiment_mode, custom_experiments, paper_datasets, paper_metrics
         )
         selected_datasets = [e.get("dataset") for e in selected_experiments if e.get("dataset")]
-        print(f"   📋 Selected experiments: {selected_datasets}")
+        rprint(f"   📋 Selected experiments: {selected_datasets}")
 
         # Format selected experiments for the prompt
         selected_exp_text = "\n".join([
@@ -453,9 +473,7 @@ Start by listing the repository contents."""
         )
 
         # Prepare callbacks
-        print("\n" + "-" * 60)
-        print(f"Planning Agent: Creating checklist for {code_path}")
-        print("-" * 60)
+        rprint(Panel(f"Creating checklist for [bold]{code_path}[/bold]", title="📋 Planning Agent", border_style="cyan"))
 
         try:
             config = {"recursion_limit": self.max_iterations}
@@ -534,7 +552,7 @@ Start by listing the repository contents."""
                 required_sections = ["## Environment Setup", "## Data Preparation", "## Experiments"]
                 missing = [s for s in required_sections if s.lower() not in content.lower()]
                 if missing:
-                    print(f"   ⚠️  Checklist incomplete (missing: {missing}), replacing with basic template")
+                    rprint(f"   ⚠️  Checklist incomplete (missing: {missing}), replacing with basic template")
                     self._create_basic_checklist(
                         checklist_path, paper_title, repo_url,
                         experiment_mode, selected_experiments,
@@ -564,7 +582,7 @@ Start by listing the repository contents."""
             return result_dict
 
         except Exception as e:
-            print(f"⚠️  Planning Agent error: {e}")
+            rprint(f"⚠️  Planning Agent error: {e}")
             # Return minimal plan on error
             checklist_path = os.path.join(code_path, "reproduction_checklist.md")
             # Default to reactive mode (skip data prep) on error
@@ -614,13 +632,13 @@ Start by listing the repository contents."""
         reason = request.get("reason", "")
         context = request.get("context", {})
 
-        print(f"📋 Planning Agent: Updating plan (requested by {source})")
-        print(f"   Reason: {reason}")
+        rprint(f"📋 Planning Agent: Updating plan (requested by {source})")
+        rprint(f"   Reason: {reason}")
 
         # Read current checklist
         current_checklist = self._read_file(checklist_path)
         if current_checklist is None:
-            print(f"⚠️  Could not read checklist: {checklist_path}")
+            rprint(f"⚠️  Could not read checklist: {checklist_path}")
             return state
 
         # Determine what section to update
@@ -649,10 +667,10 @@ Preserve the existing structure and add the new items.
 
             # Write updated checklist
             self._write_file(checklist_path, updated_content)
-            print(f"✅ Checklist updated with new {update_section} information")
+            rprint(f"✅ Checklist updated with new {update_section} information")
 
         except Exception as e:
-            print(f"⚠️  Could not update checklist: {e}")
+            rprint(f"⚠️  Could not update checklist: {e}")
 
         # Clear the update request
         state["planning_update_request"] = None
@@ -691,11 +709,11 @@ Preserve the existing structure and add the new items.
                 # Look for Skip Data Prep flag
                 if "**Skip Data Prep:** YES" in content or "Skip Data Prep: YES" in content:
                     plan["skip_data_prep"] = True
-                    print("   📋 Planning detected: Data prep can be skipped (auto-download)")
+                    rprint("   📋 Planning detected: Data prep can be skipped (auto-download)")
                 # Check if explicit data prep is required (README has specific data instructions)
                 if "**Skip Data Prep:** NO" in content or "Skip Data Prep: NO" in content:
                     plan["requires_data_prep"] = True
-                    print("   📋 Planning detected: Explicit data prep required")
+                    rprint("   📋 Planning detected: Explicit data prep required")
             except Exception:
                 pass
 
@@ -951,9 +969,9 @@ Preserve the existing structure and add the new items.
 
         try:
             self._write_file(checklist_path, content)
-            print(f"📝 Created basic checklist at {checklist_path}")
+            rprint(f"📝 Created basic checklist at {checklist_path}")
         except Exception as e:
-            print(f"⚠️  Could not create checklist: {e}")
+            rprint(f"⚠️  Could not create checklist: {e}")
 
     def _determine_update_section(self, source: str, context: Dict) -> str:
         """Determine which section to update based on request source.
@@ -1084,5 +1102,5 @@ Preserve the existing structure and add the new items.
             return False
 
         except Exception as e:
-            print(f"⚠️  Could not update checklist item: {e}")
+            rprint(f"⚠️  Could not update checklist item: {e}")
             return False

@@ -59,10 +59,9 @@ class ValidationAgent:
             write_file,
         ]
 
-        print("\n" + "=" * 60)
-        print("Validation Agent Initialized")
-        print(f"   Max Iterations: {max_iterations}")
-        print("=" * 60)
+        from rich.console import Console
+        from rich.panel import Panel
+        Console().print(Panel(f"Max Iterations: {max_iterations}", title="Validation Agent Initialized", border_style="cyan", expand=False))
 
     def verify_results(self, state: Dict) -> Dict:
         """Verify experiment results against paper claims.

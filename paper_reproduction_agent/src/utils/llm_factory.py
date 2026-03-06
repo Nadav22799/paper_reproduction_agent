@@ -1,8 +1,17 @@
-"""LLM Factory - Gemini and Claude support.
+"""LLM Factory - Gemini and Claude support with tier-based model selection.
 
-Simplified version supporting only two providers:
+Supports two providers:
 - Gemini (primary) with implicit caching (automatic on Gemini 3/2.5)
 - Claude (alternative) with automatic prompt caching via beta header
+
+Supports two tiers:
+- "strong": For complex agents (Planning, EnvironmentSetup, Execution, Generalization)
+- "weak": For simple agents (Supervisor, Critic, DataPrep, Validation)
+
+Tier model resolution (fully backward compatible):
+  STRONG: GEMINI_MODEL_STRONG -> GEMINI_MODEL -> default
+  WEAK:   GEMINI_MODEL_WEAK   -> GEMINI_MODEL -> default
+  Same pattern for ANTHROPIC_MODEL_STRONG / ANTHROPIC_MODEL_WEAK.
 """
 
 import os
@@ -35,19 +44,41 @@ def get_provider() -> str:
     )
 
 
+def _resolve_gemini_model(tier: str) -> str:
+    """Resolve Gemini model name for the given tier.
+
+    Fallback chain: GEMINI_MODEL_{TIER} -> GEMINI_MODEL -> default.
+    """
+    if tier == "weak":
+        return os.getenv("GEMINI_MODEL_WEAK") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    return os.getenv("GEMINI_MODEL_STRONG") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+
+
+def _resolve_claude_model(tier: str) -> str:
+    """Resolve Claude model name for the given tier.
+
+    Fallback chain: ANTHROPIC_MODEL_{TIER} -> ANTHROPIC_MODEL -> default.
+    """
+    if tier == "weak":
+        return os.getenv("ANTHROPIC_MODEL_WEAK") or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    return os.getenv("ANTHROPIC_MODEL_STRONG") or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+
+
 def create_llm(
     temperature: float = 0.3,
     include_thoughts: bool = True,
+    tier: str = "strong",
 ):
     """
-    Create LLM instance based on configured provider.
+    Create LLM instance based on configured provider and tier.
 
     Args:
         temperature: Generation temperature (default from env or 0.3)
         include_thoughts: Enable chain-of-thought (Gemini only)
+        tier: "strong" for complex agents, "weak" for simple agents
 
     Returns:
-        Configured LLM instance
+        Configured LLM instance (with _tier and _model_name attributes stamped)
     """
     if temperature == 0.3:
         temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
@@ -55,22 +86,35 @@ def create_llm(
     provider = get_provider()
 
     if provider == "gemini":
-        return _create_gemini_llm(temperature, include_thoughts)
+        llm = _create_gemini_llm(temperature, include_thoughts, tier=tier)
     else:
-        return _create_claude_llm(temperature)
+        llm = _create_claude_llm(temperature, tier=tier)
 
+    # Stamp tier metadata onto the instance for downstream identification
+    llm._tier = tier
+    return llm
+
+
+_printed_models = set()
 
 def _create_gemini_llm(
     temperature: float,
     include_thoughts: bool,
+    tier: str = "strong",
 ):
     """Create Gemini LLM (implicit caching is automatic on Gemini 3/2.5)."""
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    model = _resolve_gemini_model(tier)
 
-    print(f"Using Gemini: {model}")
+    global _printed_models
+    model_key = f"gemini_{tier}_{model}"
+    if model_key not in _printed_models:
+        from rich.console import Console
+        Console().print(f"🤖 [bold blue]Using Gemini \\[[cyan]{tier}[/cyan]\\]:[/bold blue] {model}")
+        _printed_models.add(model_key)
+
     return ChatGoogleGenerativeAI(
         model=model,
         google_api_key=api_key,
@@ -79,22 +123,29 @@ def _create_gemini_llm(
     )
 
 
-def _create_claude_llm(temperature: float):
+def _create_claude_llm(temperature: float, tier: str = "strong"):
     """Create Claude LLM with prompt caching enabled via beta header."""
     from langchain_anthropic import ChatAnthropic
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
-    model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    model = _resolve_claude_model(tier)
 
     # Enable prompt caching via beta header
     extra_headers = {"anthropic-beta": "prompt-caching-2024-07-31"}
 
-    print(f"Using Claude: {model} (caching enabled)")
+    global _printed_models
+    model_key = f"claude_{tier}_{model}"
+    if model_key not in _printed_models:
+        from rich.console import Console
+        Console().print(f"🤖 [bold purple]Using Claude \\[[cyan]{tier}[/cyan]\\]:[/bold purple] {model} (caching enabled)")
+        _printed_models.add(model_key)
+    max_retries = int(os.getenv("LLM_MAX_RETRIES", "3"))  # auto-retry on transient errors
     return ChatAnthropic(
         anthropic_api_key=api_key,
         model=model,
         temperature=temperature,
         extra_headers=extra_headers,
+        max_retries=max_retries,
     )
 
 
@@ -151,9 +202,11 @@ class GeminiEmbedder:
         client = self._ensure_client()
 
         try:
+            embed_timeout = int(os.getenv("EMBEDDING_TIMEOUT", "60"))  # default 60 s
             result = client.models.embed_content(
                 model=self.model,
                 contents=text,
+                config={"http_options": {"timeout": embed_timeout * 1000}},
             )
             # Track tokens (Gemini API doesn't return token count, estimate from text)
             if self.metrics_tracker and hasattr(

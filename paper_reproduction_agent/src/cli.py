@@ -4,6 +4,14 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+
+console = Console()
+
 # Ensure we can import from src
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -18,21 +26,26 @@ from src.orchestrator import PaperReproductionOrchestrator
 from src.config import ReproductionConfig
 
 
-@click.group()
-def cli():
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
     """Paper Reproduction Agent CLI - Reproduce research papers with AI."""
-    pass
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(reproduce)
 
 
 @cli.command()
-@click.argument("paper_input")
+@click.argument("paper_input", required=False)
 @click.option("--no-logging", is_flag=True, help="Disable file logging")
 @click.option("--no-checkpoints", is_flag=True, help="Disable checkpoint/resume")
-@click.option("--max-iterations", default=50, help="Maximum tool iterations")
-@click.option("--max-cycles", default=5, help="Maximum recovery/validation cycles")
+@click.option("--max-iterations", type=int, default=None, help="Maximum tool iterations")
+@click.option("--max-cycles", type=int, default=None, help="Maximum recovery/validation cycles")
 @click.option("--critic-mode", type=click.Choice(["auto", "critic"]), default=None,
               help="auto=fully autonomous, critic=ask before dangerous actions")
-def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycles, critic_mode):
+@click.option("--mode", type=click.Choice(["reproduce", "reproduce+generalize", "generalize"]),
+              default=None,
+              help="reproduce=standard, reproduce+generalize=with generalization test, generalize=generalization only (needs prior checkpoint)")
+def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycles, critic_mode, mode):
     """Reproduce a paper given its arXiv ID, URL, or Path.
 
     PAPER_INPUT can be:
@@ -40,6 +53,50 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
     - URL to PDF (e.g., https://arxiv.org/pdf/...)
     - Path to local PDF
     """
+    import questionary
+    
+    # Interactive Menu if no paper is provided
+    if not paper_input:
+        console.print(Panel.fit(
+            Text.assemble(
+                ("Paper Reproduction Agent ", "bold cyan"),
+                ("CLI", "italic yellow")
+            ),
+            subtitle="Interactive Setup",
+            border_style="bright_blue"
+        ))
+        
+        paper_input = questionary.text("📄 Enter the Paper identifier (arXiv ID, URL, or local path):").ask()
+        if not paper_input:
+            console.print("[red]❌ Paper input is required. Exiting.[/red]")
+            sys.exit(1)
+            
+        if mode is None:
+            mode = questionary.select(
+                "📋 Select the Run Mode:",
+                choices=[
+                    "reproduce", 
+                    "reproduce+generalize", 
+                    "generalize"
+                ]
+            ).ask()
+            
+        if critic_mode is None:
+            critic_mode = questionary.select(
+                "🛡️  Security Mode (Critic pauses execution on dangerous commands for your approval):",
+                choices=[
+                    questionary.Choice("Auto (fully autonomous)", value="auto"),
+                    questionary.Choice("Critic (ask before dangerous actions)", value="critic")
+                ],
+                default="auto"
+            ).ask()
+            
+    # Set default values if not provided by CLI or interactive menu
+    max_iterations = max_iterations if max_iterations is not None else 50
+    max_cycles = max_cycles if max_cycles is not None else 5
+    mode = mode or "reproduce"
+    critic_mode = critic_mode or "auto"
+
     # Force UTF-8 for stdout to support emojis on Windows
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
@@ -60,26 +117,25 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
 
         tee = TeeOutput(log_file)
         sys.stdout = tee
-        click.echo(f"📝 Logging to: {log_file}")
+        console.print(f"📝 Logging to: {log_file}")
 
     try:
-        click.echo(f"🚀 Starting reproduction for: {paper_input}")
-        click.echo(f"🔄 Max cycles: {max_cycles}")
-
-        # Critic mode selection
-        if critic_mode is None:
-            click.echo("\n🛡️  Security Mode:")
-            click.echo("1. Auto (fully autonomous, recommended for speed)")
-            click.echo("2. Critic (ask before dangerous actions, recommended for safety)")
-            mode_choice = click.prompt(
-                "Please choose",
-                type=click.Choice(["1", "2"]),
-                default="1",
-                show_default=True,
-            )
-            critic_mode = "auto" if mode_choice == "1" else "critic"
+        # Re-print title if we skipped the interactive menu
+        if paper_input and not 'settings' in locals():
+             console.print(Panel.fit(
+                Text.assemble(
+                    ("Paper Reproduction Agent ", "bold cyan"),
+                    ("CLI", "italic yellow")
+                ),
+                subtitle="Reproduce research papers with AI",
+                border_style="bright_blue"
+            ))
+            
+        console.print(f"🚀 Starting reproduction for: [bold cyan]{paper_input}[/bold cyan]")
+        console.print(f"🔄 Max cycles: [bold]{max_cycles}[/bold]")
+        console.print(f"📋 Run mode: [bold]{mode}[/bold]")
+        console.print(f"🛡️  Critic mode: [bold green]{critic_mode.upper()}[/bold green]")
         os.environ["CRITIC_MODE"] = critic_mode
-        click.echo(f"🛡️  Critic mode: {critic_mode.upper()}")
 
         # Disable orchestrator's internal logging since we capture stdout
         orchestrator = PaperReproductionOrchestrator(
@@ -115,6 +171,9 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
             "user_input_required": None,
             "user_input_response": None,
             "waiting_for_user": False,
+            "run_mode": mode,
+            "generalization_results": None,
+            "generalization_success": False,
         }
 
         # Try to resume from checkpoint
@@ -126,109 +185,251 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
                  initial_state.update(resumed_state)
                  # Ensure max_cycles from CLI overrides resumed state if needed, or stick to CLI
                  initial_state["max_cycles"] = max_cycles
-                 click.echo(f"✨ Resumed state contains {len(initial_state.get('completed_phases', []))} completed phases")
-        
-        # User Selection for Experiment Level (skip if already set in resumed state)
+                 console.print(f"✨ Resumed state contains {len(initial_state.get('completed_phases', []))} completed phases")
+
+        # Validate generalize-only mode
+        if mode == "generalize":
+            if not resumed_state or not initial_state.get("results_match"):
+                console.print("[bold red]❌ Generalize-only mode requires a prior successful reproduction (with matching results).[/bold red]")
+                console.print("   Run with --mode reproduce first, then re-run with --mode generalize.")
+                sys.exit(1)
+            console.print("🔬 Generalize-only mode: skipping reproduction, running generalization directly")
+
         if (
             not no_logging
             and not initial_state.get("experiment_selection_mode")
         ):  # Only prompt in interactive mode AND if not already decided
-            click.echo("\n🎯 Select Reproduction Level:")
-            click.echo("1. Single Experiment (Main Result)")
-            click.echo("2. All Experiments (Full Reproduction)")
-            click.echo("3. Custom Selection")
-            selection = click.prompt(
-                "Please choose",
-                type=click.Choice(["1", "2", "3"]),
-                default="1",
-                show_default=True,
-            )
+            import questionary
+            selection = questionary.select(
+                "🎯 Select Reproduction Level:",
+                choices=[
+                    questionary.Choice("1. Single Experiment (Main Result)", "1"),
+                    questionary.Choice("2. All Experiments (Full Reproduction)", "2"),
+                    questionary.Choice("3. Custom Selection", "3"),
+                ]
+            ).ask()
+            
+            if not selection:
+                selection = "1"
 
             mode_map = {"1": "single", "2": "all", "3": "custom"}
             initial_state["experiment_selection_mode"] = mode_map[selection]
 
             if selection == "3":
-                custom_input = click.prompt("Enter experiment names (comma separated)")
+                custom_input = session.prompt(HTML('<ansicyan><b>Enter experiment names (comma separated): </b></ansicyan>')).strip()
                 initial_state["custom_experiment_list"] = [
-                    e.strip() for e in custom_input.split(",")
+                    e.strip() for e in custom_input.split(",") if e.strip()
                 ]
 
-            click.echo(
-                f"✅ Selected mode: {initial_state['experiment_selection_mode'].upper()}"
+            console.print(
+                f"✅ Selected mode: [bold green]{initial_state['experiment_selection_mode'].upper()}[/bold green]"
             )
             if initial_state.get("custom_experiment_list"):
-                click.echo(f"   Experiments: {initial_state['custom_experiment_list']}")
+                console.print(f"   Experiments: {initial_state['custom_experiment_list']}")
 
         # Start/resume metrics tracking
         if not no_checkpoints and resumed_state and orchestrator.metrics_tracker.metrics.workflow_start:
             # Metrics were restored from checkpoint - resume (preserves original start time)
             orchestrator.metrics_tracker.resume_workflow()
-            click.echo("   📊 Resumed metrics tracking (original start time preserved)")
+            console.print("   📊 Resumed metrics tracking (original start time preserved)")
         else:
             # Fresh start
             orchestrator.metrics_tracker.start_workflow()
 
         try:
-            result = orchestrator.workflow.invoke(initial_state)
+            # If resuming with pending user input, go straight into the input loop
+            # (Planning was already completed & checkpointed but .env wasn't written yet)
+            if resumed_state and initial_state.get("final_status") == "waiting_for_user_input":
+                console.print("[bold yellow]⚠  Resumed with pending user input — collecting before continuing[/bold yellow]")
+                result = dict(initial_state)
+            else:
+                result = orchestrator.workflow.invoke(initial_state)
 
             # Handle user input pause/resume loop
             while result.get("final_status") == "waiting_for_user_input":
                 req = result.get("user_input_required", {})
-                click.echo("\n" + "=" * 60)
-                click.echo("  ACTION REQUIRED - Reproduction Paused")
-                click.echo("=" * 60)
-                click.echo(
-                    f"\n{req.get('description', 'User action needed before continuing:')}\n"
-                )
+                items = req.get("items", [])
 
-                for i, item in enumerate(req.get("items", []), 1):
-                    click.echo(f"  {i}. [{item.get('name', 'Unknown')}]")
+                # Silence metrics while we own the terminal
+                orchestrator.metrics_tracker.pause_display()
+
+                import re as _re
+                import questionary
+
+                # Strip markdown bold/italic markers that LLMs write in checklist text
+                def _clean(text: str) -> str:
+                    return _re.sub(r"\*+|`", "", text or "").strip()
+
+                # ── Summary panel ─────────────────────────────────────────────
+                summary = Text()
+                summary.append(f"\n{_clean(req.get('description', 'User action needed before continuing.'))}\n\n")
+                for i, item in enumerate(items, 1):
+                    summary.append(f"  {i}. ", style="bold yellow")
+                    summary.append(f"{_clean(item.get('name', 'Unknown'))}", style="bold white")
+                    item_type = item.get("type", "")
+                    if item_type:
+                        summary.append(f"  [{item_type}]", style="dim")
+                    summary.append("\n")
                     if item.get("description"):
-                        click.echo(f"     {item['description']}")
+                        summary.append(f"     {_clean(item['description'])}\n", style="dim")
                     if item.get("instructions"):
-                        click.echo(f"     Instructions: {item['instructions']}")
+                        summary.append(f"     ℹ  {_clean(item['instructions'])}\n", style="cyan")
                     if item.get("env_var"):
-                        click.echo(f"     Set as: export {item['env_var']}=<your_value>")
-                click.echo()
+                        summary.append(f"     → {item['env_var']}=<value>  (will be saved to .env)\n", style="green")
 
-                # Collect user responses
+                console.print()
+                console.print(Panel(
+                    summary,
+                    title="[bold yellow]⚠  ACTION REQUIRED — Reproduction Paused[/bold yellow]",
+                    border_style="yellow",
+                    padding=(0, 2),
+                ))
+
+                # ── Per-item prompts, each wrapped in a mini panel ────────────
                 responses = {}
-                for item in req.get("items", []):
-                    if item.get("type") == "api_key":
-                        value = click.prompt(
-                            f"  Enter {item.get('name', 'value')}",
-                            hide_input=True,
-                        )
-                        responses[item.get("env_var") or item.get("name", "key")] = value
-                    else:
-                        click.confirm(
-                            f"  Have you completed: {item.get('name', 'this step')}?",
-                            default=True,
-                        )
-                        responses[item.get("name", "step")] = "provided"
+                for item in items:
+                    name = _clean(item.get("name", "Unknown"))
+                    itype = item.get("type", "confirm")
+                    env_var = item.get("env_var") or name
+                    instructions = _clean(item.get("instructions", ""))
 
-                # Resume workflow with user input
+                    prompt_body = Text()
+                    if instructions:
+                        prompt_body.append(f"{instructions}\n\n", style="dim")
+
+                    if itype == "api_key":
+                        prompt_body.append("Enter the value below (input is hidden):", style="bold")
+                        console.print(Panel(
+                            prompt_body,
+                            title=f"[bold cyan]🔑  {name}[/bold cyan]",
+                            border_style="cyan",
+                            padding=(0, 2),
+                        ))
+                        value = questionary.password(f"  {name}:").ask()
+                        responses[env_var] = value or ""
+
+                    elif itype == "text":
+                        prompt_body.append("Type your response below:", style="bold")
+                        console.print(Panel(
+                            prompt_body,
+                            title=f"[bold cyan]✏  {name}[/bold cyan]",
+                            border_style="cyan",
+                            padding=(0, 2),
+                        ))
+                        value = questionary.text(f"  {name}:").ask()
+                        responses[env_var] = value or ""
+
+                    else:
+                        prompt_body.append("Confirm when ready to continue:", style="bold")
+                        console.print(Panel(
+                            prompt_body,
+                            title=f"[bold cyan]✅  {name}[/bold cyan]",
+                            border_style="cyan",
+                            padding=(0, 2),
+                        ))
+                        ans = questionary.confirm(f"  Have you completed: {name}?").ask()
+                        responses[name] = "provided" if ans else "skipped"
+
+                # ── Optional free-form notes ───────────────────────────────────
+                if req.get("requires_text_input", False):
+                    console.print(Panel(
+                        Text("Provide any additional context, notes, or instructions for the agent.", style="dim"),
+                        title="[bold cyan]💬  Additional Information[/bold cyan]",
+                        border_style="cyan",
+                        padding=(0, 2),
+                    ))
+                    additional_info = questionary.text("  Your notes:").ask()
+                    if additional_info:
+                        responses["user_notes"] = additional_info
+
+                # ── Write credentials to cloned_repo/.env ─────────────────────
+                code_path = (
+                    result.get("implementation_path")
+                    or getattr(orchestrator.config, "repo_path", None)
+                )
+                env_entries = [
+                    (item.get("env_var"), responses.get(item.get("env_var") or _clean(item.get("name", ""))))
+                    for item in items
+                    if item.get("env_var")
+                    and responses.get(item.get("env_var") or _clean(item.get("name", "")))
+                    not in (None, "", "provided", "skipped")
+                ]
+                if code_path and env_entries:
+                    env_file = os.path.join(code_path, ".env")
+                    mode = "a" if os.path.exists(env_file) else "w"
+                    with open(env_file, mode, encoding="utf-8") as f:
+                        if mode == "a":
+                            f.write("\n")
+                        f.write("# Credentials provided by user — Paper Reproduction Agent\n")
+                        for env_var, value in env_entries:
+                            f.write(f"{env_var}={value}\n")
+
+                    # Also inject into current process so agents can use them immediately
+                    for env_var, value in env_entries:
+                        os.environ[env_var] = value
+
+                    # Update the checklist to reference the .env file
+                    checklist_path = result.get("checklist_path", "")
+                    if checklist_path and os.path.exists(checklist_path):
+                        with open(checklist_path, "r", encoding="utf-8") as f:
+                            checklist = f.read()
+                        # Use forward slashes in the note so it's valid on both Windows and WSL
+                        env_file_display = env_file.replace("\\", "/")
+                        env_note = (
+                            f"\n> **Credentials saved:** `{env_file_display}`  \n"
+                            f"> Load with `source {env_file_display}` (Linux/WSL/macOS) "
+                            f"or `dotenv` (Windows) before running.\n"
+                        )
+                        if env_note.strip() not in checklist:
+                            # Insert after the User Input Required section header.
+                            # Use a lambda to avoid re interpreting backslashes in
+                            # Windows paths (e.g. \U) as regex escape sequences.
+                            checklist = _re.sub(
+                                r"(##\s*User Input Required\s*\n)",
+                                lambda m: m.group(1) + env_note,
+                                checklist,
+                                count=1,
+                            )
+                            with open(checklist_path, "w", encoding="utf-8") as f:
+                                f.write(checklist)
+
+                    console.print(Panel(
+                        Text(f"Credentials written to: {env_file}", style="bold green"),
+                        title="[bold green]💾  Saved[/bold green]",
+                        border_style="green",
+                        padding=(0, 2),
+                    ))
+
+                # ── Resume ────────────────────────────────────────────────────
+                orchestrator.metrics_tracker.resume_display()
+
                 result["user_input_response"] = responses
                 result["waiting_for_user"] = False
                 result["final_status"] = ""
-                click.echo("\n🔄 Resuming reproduction...\n")
+                console.print()
+                console.print(Panel(
+                    Text("All inputs collected — continuing the workflow.", style="bold green"),
+                    title="[bold green]🔄  Resuming Reproduction[/bold green]",
+                    border_style="green",
+                    padding=(0, 2),
+                ))
+                console.print()
                 result = orchestrator.workflow.invoke(result)
 
         finally:
             # Stop metrics tracking
             orchestrator.metrics_tracker.end_workflow()
-            click.echo(orchestrator.metrics_tracker.get_summary())
+            console.print(Panel(orchestrator.metrics_tracker.get_summary(), title="📊 WORKFLOW METRICS SUMMARY", border_style="cyan"))
 
-        click.echo("\n" + "=" * 60)
-        click.echo(f"🏁 Final Status: {result.get('final_status', 'Unknown')}")
-        click.echo("=" * 60)
+        console.print(Panel(f"Final Status: [bold]{result.get('final_status', 'Unknown')}[/bold]", title="🏁 Workflow Complete", border_style="green"))
 
         if result.get("report"):
-            click.echo("\n📄 Reproduction Report:")
-            click.echo(result["report"])
+            console.print("\n📄 [bold]Reproduction Report:[/bold]")
+            from rich.markdown import Markdown
+            console.print(Markdown(result["report"]))
 
     except Exception as e:
-        click.echo(f"\n❌ Error: {e}")
+        console.print(f"\n[bold red]❌ Error: {e}[/bold red]")
         import traceback
 
         traceback.print_exc()
@@ -239,51 +440,54 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
             sys.stdout = tee.terminal
             tee.close()
             if not no_logging:
-                click.echo(f"\n📝 Full execution log saved to: {log_file}")
+                console.print(f"\n📝 Full execution log saved to: {log_file}")
 
 
 @cli.command()
 def verify():
     """Run self-verification tests."""
+    from rich.console import Console
+    console = Console()
+    
     # Force UTF-8 for stdout to support emojis on Windows
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
 
-    click.echo("Running internal verification...")
+    console.print("Running internal verification...")
 
     checks = []
 
     # Check 1: Core Imports
     try:
         import importlib.util
-        for _pkg in ("torch", "langchain", "langgraph"):
+        for _pkg in ("langchain", "langgraph"):
             if importlib.util.find_spec(_pkg) is None:
-                raise ImportError(_pkg)
+                raise ImportError(name=_pkg)
 
-        checks.append(("✅ Core Dependencies", True))
+        checks.append(("[green]✅ Core Dependencies[/green]", True))
     except ImportError as e:
-        checks.append((f"❌ Missing Dependency: {e.name}", False))
+        checks.append((f"[red]❌ Missing Dependency: {e.name}[/red]", False))
 
     # Check 2: Directory Structure
     req_dirs = ["logs", "downloads", "src"]
     for d in req_dirs:
         if os.path.exists(d):
-            checks.append((f"✅ Directory found: {d}", True))
+            checks.append((f"[green]✅ Directory found: {d}[/green]", True))
         else:
-            checks.append((f"❌ Missing directory: {d}", False))
+            checks.append((f"[red]❌ Missing directory: {d}[/red]", False))
 
     # Report
-    click.echo("\nSystem Health Check:")
+    console.print("\n[bold]System Health Check:[/bold]")
     all_passed = True
     for msg, passed in checks:
-        click.echo(msg)
+        console.print(msg)
         if not passed:
             all_passed = False
 
     if all_passed:
-        click.echo("\n✨ System is ready for reproduction!")
+        console.print("\n✨ [bold green]System is ready for reproduction![/bold green]")
     else:
-        click.echo("\n⚠️ System has issues. Please check the errors above.")
+        console.print("\n⚠️ [bold red]System has issues. Please check the errors above.[/bold red]")
         sys.exit(1)
 
 

@@ -48,8 +48,8 @@ class EnvironmentSetupAgent:
         self.callbacks = callbacks or []
         self.hierarchical_context = hierarchical_context
 
-        from ..config.prompts import ENVIRONMENT_AGENT_PROMPT
-        self.system_prompt = ENVIRONMENT_AGENT_PROMPT
+        from ..config.prompts import ENVIRONMENT_AGENT_PROMPT, EFFICIENCY_RULES
+        self.system_prompt = ENVIRONMENT_AGENT_PROMPT.replace("{efficiency_rules}", EFFICIENCY_RULES)
 
         # Tools for environment setup (dangerous tools wrapped with safety guards)
         self.tools = [
@@ -69,10 +69,9 @@ class EnvironmentSetupAgent:
         # Create ReAct agent
         self.agent = create_react_agent(self.llm, tools=self.tools)
 
-        print("\n" + "=" * 60)
-        print("🔧 Environment Setup Agent Initialized")
-        print(f"   Max Iterations: {max_iterations}")
-        print("=" * 60)
+        from rich.console import Console
+        from rich.panel import Panel
+        Console().print(Panel(f"Max Iterations: {max_iterations}", title="🔧 Environment Setup Agent Initialized", border_style="cyan", expand=False))
 
     def setup_environment(
         self,
@@ -318,6 +317,20 @@ class EnvironmentSetupAgent:
         )
         full_conversation_lower = full_conversation.lower()
 
+        # GUARD: Check if the agent actually called any tools.
+        # If the agent only produced reasoning/planning text without executing
+        # any tools, it cannot have successfully set up an environment.
+        from langchain_core.messages import ToolMessage
+        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        agent_executed_tools = len(tool_messages) > 0
+
+        if not agent_executed_tools:
+            print("⚠️  Environment agent produced NO tool calls — marking as failed (agent only planned, didn't execute)")
+            result["success"] = False
+            result["status"] = "failed"
+            result["error"] = "Agent only planned but never executed any tools. No environment was set up."
+            return result
+
         # =====================================================================
         # USE STRUCTURED LLM OUTPUT FOR ROBUST SUCCESS DETECTION
         # This replaces brittle keyword matching with LLM judgment
@@ -359,11 +372,16 @@ class EnvironmentSetupAgent:
 CONVERSATION (last 8000 chars):
 {full_conversation[-8000:]}
 
-Did the smoke test pass? A smoke test passes if:
+Did the smoke test pass? A smoke test passes ONLY if ALL of these are true:
+- Tools were actually called (execute_shell_command, execute_python_code, etc.)
+- An environment was actually created (not just planned)
 - The script ran and printed output (hyperparameters, dataset info, training started)
 - No Python exceptions (Traceback) crashed the script
 - IGNORE warnings (DeprecationWarning, FutureWarning, distutils, etc.)
 - IGNORE the word "error" if it's just in a variable name or log format string
+
+IMPORTANT: If the conversation only contains reasoning/planning about what to do
+WITHOUT actual tool execution results, then smoke_test_passed MUST be False.
 
 Extract the environment name from commands like "micromamba create -n NAME" or "micromamba run -n NAME".
 Determine the environment type (micromamba, conda, pip, venv) based on the commands used.
