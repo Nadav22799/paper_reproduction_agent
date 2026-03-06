@@ -656,8 +656,15 @@ class PaperReproductionOrchestrator:
             },
         )
 
-        # === GENERALIZATION → REPORT ===
-        workflow.add_edge("generalization", "generate_report")
+        # === GENERALIZATION → REPORT (conditional for user-input pause) ===
+        workflow.add_conditional_edges(
+            "generalization",
+            self._route_after_generalization,
+            {
+                "continue": "generate_report",
+                "pause": "generate_report",
+            },
+        )
 
         workflow.add_edge("generate_report", END)
 
@@ -1095,6 +1102,12 @@ class PaperReproductionOrchestrator:
                 return "retry"
 
         return "failed"
+
+    def _route_after_generalization(self, state: PaperReproductionState) -> str:
+        """Route after generalization — pause if user input is needed."""
+        if state.get("waiting_for_user", False):
+            return "pause"
+        return "continue"
 
     def _route_after_validation(self, state: PaperReproductionState) -> str:
         """Route after validation — optionally to generalization if mode allows."""

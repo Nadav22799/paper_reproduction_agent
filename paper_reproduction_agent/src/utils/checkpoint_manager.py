@@ -207,7 +207,7 @@ class ExperimentCheckpoint:
                     checkpoints.append((key, data))
 
             except Exception as e:
-                print(f"⚠️  Error searching checkpoint {checkpoint_file.name}: {e}")
+                print(f"⚠️  Error searching checkpoint {key}: {e}")
                 continue
 
         if checkpoints:
