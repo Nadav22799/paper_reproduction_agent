@@ -11,18 +11,26 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
+from src.utils.storage import StorageProvider, StorageManager
+
 
 class ReproductionEvaluator:
     """Evaluator for paper reproduction attempts."""
 
-    def __init__(self, results_dir: str = "./evaluation_results"):
+    def __init__(
+        self,
+        results_dir: str = "./evaluation_results",
+        storage: Optional[StorageProvider] = None,
+    ):
         """Initialize evaluator.
 
         Args:
-            results_dir: Directory to store evaluation results
+            results_dir: Directory to store evaluation results locally.
+            storage: Optional StorageProvider for cloud persistence.
         """
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self._storage = storage or StorageManager.get_provider(base_dir=results_dir)
 
     def evaluate_test_a(
         self,
@@ -334,24 +342,18 @@ class ReproductionEvaluator:
             test_type: "test_a" or "test_b"
             evaluation: Evaluation results
         """
-        # Create subdirectory for paper
-        paper_dir = self.results_dir / paper_id.replace(":", "_")
-        paper_dir.mkdir(parents=True, exist_ok=True)
+        # Create subdirectory for paper (used as key prefix)
+        paper_subdir = paper_id.replace(":", "_")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Save JSON
-        json_path = (
-            paper_dir / f"{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        )
-        with open(json_path, "w") as f:
-            json.dump(evaluation, f, indent=2)
+        json_key = f"{paper_subdir}/{test_type}_{ts}.json"
+        self._storage.save_text(json.dumps(evaluation, indent=2), json_key)
 
-        # Save report
+        # Save markdown report
         if "report" in evaluation:
-            report_path = (
-                paper_dir / f"{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            )
-            with open(report_path, "w") as f:
-                f.write(evaluation["report"])
+            report_key = f"{paper_subdir}/{test_type}_{ts}.md"
+            self._storage.save_text(evaluation["report"], report_key)
 
     def generate_benchmark_report(self, test_type: str = "both") -> Dict[str, Any]:
         """Generate aggregate report across all evaluations.
@@ -364,23 +366,24 @@ class ReproductionEvaluator:
         """
         all_evaluations = []
 
-        # Load all evaluations
-        for paper_dir in self.results_dir.iterdir():
-            if not paper_dir.is_dir():
+        # Load all evaluations via StorageProvider (works for local and cloud)
+        for key in self._storage.list_files("", "**/*.json"):
+            # Skip benchmark files themselves
+            if key.startswith("benchmark_"):
                 continue
-
-            for eval_file in paper_dir.glob("*.json"):
-                try:
-                    with open(eval_file, "r") as f:
-                        evaluation = json.load(f)
-                        if (
-                            test_type == "both"
-                            or evaluation.get("test_type")
-                            == test_type.split("_")[1].upper()
-                        ):
-                            all_evaluations.append(evaluation)
-                except Exception:
-                    continue
+            text = self._storage.read_text(key)
+            if not text:
+                continue
+            try:
+                evaluation = json.loads(text)
+                if (
+                    test_type == "both"
+                    or evaluation.get("test_type")
+                    == test_type.split("_")[1].upper()
+                ):
+                    all_evaluations.append(evaluation)
+            except Exception:
+                continue
 
         if not all_evaluations:
             return {"error": "No evaluations found"}
@@ -409,12 +412,8 @@ class ReproductionEvaluator:
         }
 
         # Save benchmark report
-        benchmark_path = (
-            self.results_dir
-            / f"benchmark_{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        )
-        with open(benchmark_path, "w") as f:
-            json.dump(benchmark, f, indent=2)
+        benchmark_key = f"benchmark_{test_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        self._storage.save_text(json.dumps(benchmark, indent=2), benchmark_key)
 
         return benchmark
 

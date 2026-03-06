@@ -175,6 +175,7 @@ next-env.d.ts
 # Development work (not committed)
 # ============================================================================
 paper_reproduction_web/
+docker-compose.yml
 
 # ============================================================================
 # Problematic / accidental directories (never commit these)
@@ -183,3 +184,4 @@ exec -l /
 **/exec -l /
 
 CLAUDE.md
+gcp-credentials.json

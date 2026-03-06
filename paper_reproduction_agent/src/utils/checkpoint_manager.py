@@ -12,46 +12,52 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 import hashlib
 
+from src.utils.storage import StorageProvider, StorageManager, LocalStorageProvider
+
 
 class ExperimentCheckpoint:
     """Manages checkpoints for experiment reproduction workflow."""
 
-    def __init__(self, checkpoint_dir: str = "./checkpoints"):
+    def __init__(
+        self,
+        checkpoint_dir: str = "./checkpoints",
+        storage: Optional[StorageProvider] = None,
+    ):
         """Initialize checkpoint manager.
 
         Args:
-            checkpoint_dir: Directory to store checkpoint files
+            checkpoint_dir: Directory to store checkpoint files (used as base_dir
+                            for LocalStorageProvider, or as a namespace prefix).
+            storage: Optional pre-configured StorageProvider. If None, a
+                     LocalStorageProvider anchored at checkpoint_dir is created.
         """
-        # Convert to absolute path for clarity
         self.checkpoint_dir = Path(checkpoint_dir).resolve()
 
-        # Create directory and report status
-        was_created = not self.checkpoint_dir.exists()
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-        if was_created:
-            print(f"📁 Created checkpoint directory: {self.checkpoint_dir}")
+        # Use the injected provider or create a local one scoped to checkpoint_dir.
+        # Always create a fresh LocalStorageProvider rather than going through
+        # StorageManager.get_provider(), which is a singleton and would ignore
+        # the base_dir argument if a provider was already created elsewhere.
+        if storage is not None:
+            self._storage = storage
         else:
-            # Check for existing checkpoints
-            existing = list(self.checkpoint_dir.glob("*.json"))
-            if existing:
-                print(f"📁 Checkpoint directory: {self.checkpoint_dir}")
-                print(f"   Found {len(existing)} existing checkpoint file(s)")
-            else:
-                print(f"📁 Checkpoint directory: {self.checkpoint_dir} (empty)")
+            self._storage = LocalStorageProvider(base_dir=str(self.checkpoint_dir))
 
-    def _get_checkpoint_path(self, experiment_id: str, phase: str) -> Path:
-        """Get checkpoint file path for a specific experiment and phase.
+        # Ensure local directory exists (no-op for cloud backends)
+        if isinstance(self._storage, LocalStorageProvider):
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        Args:
-            experiment_id: Unique identifier for the experiment
-            phase: Phase name (environment_setup, dataset_prep, experiment_N)
+        # Report existing checkpoints
+        existing = self._storage.list_files("", "*.json")
+        if existing:
+            print(f"📁 Checkpoint directory: {self.checkpoint_dir}")
+            print(f"   Found {len(existing)} existing checkpoint file(s)")
+        else:
+            print(f"📁 Checkpoint directory: {self.checkpoint_dir} (empty)")
 
-        Returns:
-            Path to checkpoint file
-        """
+    def _get_checkpoint_key(self, experiment_id: str, phase: str) -> str:
+        """Get storage key for a specific experiment and phase."""
         safe_phase = phase.replace("/", "_").replace(" ", "_")
-        return self.checkpoint_dir / f"{experiment_id}_{safe_phase}.json"
+        return f"{experiment_id}_{safe_phase}.json"
 
     @staticmethod
     def _normalize_paper_id(paper_id: str) -> str:
@@ -73,15 +79,7 @@ class ExperimentCheckpoint:
         return paper_id.replace("arxiv:", "").strip()
 
     def _generate_experiment_id(self, repo_path: str, paper_id: str = "") -> str:
-        """Generate unique experiment ID based on repo path and paper.
-
-        Args:
-            repo_path: Path to repository
-            paper_id: Optional paper identifier (any supported format)
-
-        Returns:
-            Unique experiment ID
-        """
+        """Generate unique experiment ID based on repo path and paper."""
         normalized = self._normalize_paper_id(paper_id)
         content = f"{repo_path}_{normalized}".encode()
         return hashlib.md5(content).hexdigest()[:12]
@@ -102,7 +100,7 @@ class ExperimentCheckpoint:
         """
         try:
             experiment_id = self._generate_experiment_id(repo_path, paper_id)
-            checkpoint_path = self._get_checkpoint_path(experiment_id, phase)
+            key = self._get_checkpoint_key(experiment_id, phase)
 
             checkpoint_data = {
                 "timestamp": datetime.now().isoformat(),
@@ -113,21 +111,14 @@ class ExperimentCheckpoint:
                 "experiment_id": experiment_id,
             }
 
-            # Write to temporary file first, then rename (atomic operation)
-            temp_path = checkpoint_path.with_suffix(".tmp")
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(checkpoint_data, f, indent=2)
+            content = json.dumps(checkpoint_data, indent=2)
+            self._storage.save_text(content, key)
 
-            # os.replace() is atomic on both Unix and Windows (unlike Path.rename()
-            # which raises WinError 183 on Windows if the destination already exists)
-            os.replace(str(temp_path), str(checkpoint_path))
-
-            # Calculate checkpoint size
-            size_kb = checkpoint_path.stat().st_size / 1024
             completed_phases = state.get("completed_phases", [])
+            size_kb = len(content.encode()) / 1024
 
             print(f"💾 Checkpoint saved: {phase}")
-            print(f"   File: {checkpoint_path.name} ({size_kb:.1f} KB)")
+            print(f"   Key: {key} ({size_kb:.1f} KB)")
             print(
                 f"   Completed phases: {', '.join(completed_phases) if completed_phases else 'none'}"
             )
@@ -138,28 +129,19 @@ class ExperimentCheckpoint:
             return False
 
     def resume(self, repo_path: str, paper_id: str = "") -> Optional[Dict[str, Any]]:
-        """Resume from last successful checkpoint.
-
-        Args:
-            repo_path: Repository path
-            paper_id: Optional paper identifier
-
-        Returns:
-            Checkpoint data if found, None otherwise
-        """
+        """Resume from last successful checkpoint."""
         try:
             experiment_id = self._generate_experiment_id(repo_path, paper_id)
 
-            # Find all checkpoints for this experiment
             checkpoints = []
-            for checkpoint_file in self.checkpoint_dir.glob(f"{experiment_id}_*.json"):
-                try:
-                    with open(checkpoint_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    checkpoints.append((checkpoint_file, data))
-                except Exception as e:
-                    print(f"⚠️  Error reading checkpoint {checkpoint_file.name}: {e}")
-                    continue
+            for key in self._storage.list_files("", f"{experiment_id}_*.json"):
+                text = self._storage.read_text(key)
+                if text:
+                    try:
+                        data = json.loads(text)
+                        checkpoints.append((key, data))
+                    except Exception:
+                        continue
 
             # If no exact match, try flexible search by paper_id
             if not checkpoints and paper_id:
@@ -175,12 +157,12 @@ class ExperimentCheckpoint:
 
             # Get most recent checkpoint
             latest_checkpoint = max(checkpoints, key=lambda x: x[1]["timestamp"])
-            checkpoint_path, checkpoint_data = latest_checkpoint
+            checkpoint_key, checkpoint_data = latest_checkpoint
 
             from rich import print as rprint
             rprint(f"📂 [bold cyan]Resuming from checkpoint:[/bold cyan] {checkpoint_data['phase']}")
             rprint(f"   Saved at: {checkpoint_data['timestamp']}")
-            rprint(f"   File: {checkpoint_path}")
+            rprint(f"   Key: {checkpoint_key}")
 
             return checkpoint_data
 
@@ -191,52 +173,38 @@ class ExperimentCheckpoint:
             return None
 
     def _search_by_paper_id(self, paper_id: str) -> List[tuple]:
-        """Search for checkpoints by paper ID when exact experiment ID doesn't match.
-
-        This handles cases where the repo_path is different (relative vs absolute)
-        but the paper is the same.
-
-        Args:
-            paper_id: Paper identifier (arxiv ID, etc.)
-
-        Returns:
-            List of (checkpoint_path, checkpoint_data) tuples
-        """
+        """Search for checkpoints by paper ID when exact experiment ID doesn't match."""
         checkpoints = []
 
         # Normalize paper_id — handles bare IDs, arxiv: prefix, and full URLs
         normalized_paper_id = self._normalize_paper_id(paper_id)
 
-        for checkpoint_file in self.checkpoint_dir.glob("*.json"):
+        for key in self._storage.list_files("", "*.json"):
+            text = self._storage.read_text(key)
+            if not text:
+                continue
             try:
-                with open(checkpoint_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = json.loads(text)
 
-                # Check if this checkpoint matches the paper
                 checkpoint_paper_id = (
                     data.get("paper_id", "").replace("arxiv:", "").strip()
                 )
-
                 if checkpoint_paper_id == normalized_paper_id:
-                    checkpoints.append((checkpoint_file, data))
+                    checkpoints.append((key, data))
                     continue
 
-                # Also check in state
                 state = data.get("state", {})
                 state_paper_id = (
                     state.get("paper_input", "").replace("arxiv:", "").strip()
                 )
-
                 if state_paper_id == normalized_paper_id:
-                    checkpoints.append((checkpoint_file, data))
+                    checkpoints.append((key, data))
                     continue
 
-                # Check arxiv_id in paper_metadata
                 metadata = state.get("paper_metadata", {})
                 arxiv_id = metadata.get("arxiv_id", "").strip()
-
                 if arxiv_id == normalized_paper_id:
-                    checkpoints.append((checkpoint_file, data))
+                    checkpoints.append((key, data))
 
             except Exception as e:
                 print(f"⚠️  Error searching checkpoint {checkpoint_file.name}: {e}")
@@ -246,30 +214,22 @@ class ExperimentCheckpoint:
             print(
                 f"   ✅ Found {len(checkpoints)} checkpoint(s) matching paper {paper_id}"
             )
-
         return checkpoints
 
     def list_phases(self, repo_path: str, paper_id: str = "") -> List[str]:
-        """List all completed phases for an experiment.
-
-        Args:
-            repo_path: Repository path
-            paper_id: Optional paper identifier
-
-        Returns:
-            List of completed phase names
-        """
+        """List all completed phases for an experiment."""
         try:
             experiment_id = self._generate_experiment_id(repo_path, paper_id)
 
             phases = []
-            for checkpoint_file in self.checkpoint_dir.glob(f"{experiment_id}_*.json"):
-                try:
-                    with open(checkpoint_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    phases.append(data["phase"])
-                except Exception:
-                    continue
+            for key in self._storage.list_files("", f"{experiment_id}_*.json"):
+                text = self._storage.read_text(key)
+                if text:
+                    try:
+                        data = json.loads(text)
+                        phases.append(data["phase"])
+                    except Exception:
+                        continue
 
             return sorted(phases)
 
@@ -278,28 +238,19 @@ class ExperimentCheckpoint:
             return []
 
     def clear(self, repo_path: str, paper_id: str = "") -> bool:
-        """Clear all checkpoints for an experiment.
-
-        Args:
-            repo_path: Repository path
-            paper_id: Optional paper identifier
-
-        Returns:
-            True if cleared successfully
-        """
+        """Clear all checkpoints for an experiment."""
         try:
             experiment_id = self._generate_experiment_id(repo_path, paper_id)
 
             count = 0
-            for checkpoint_file in self.checkpoint_dir.glob(f"{experiment_id}_*.json"):
-                checkpoint_file.unlink()
+            for key in self._storage.list_files("", f"{experiment_id}_*.json"):
+                self._storage.delete(key)
                 count += 1
 
             if count > 0:
                 print(
                     f"🗑️  Cleared {count} checkpoint(s) for experiment {experiment_id}"
                 )
-
             return True
 
         except Exception as e:
@@ -307,15 +258,7 @@ class ExperimentCheckpoint:
             return False
 
     def get_phase_status(self, repo_path: str, paper_id: str = "") -> Dict[str, bool]:
-        """Get completion status for all phases.
-
-        Args:
-            repo_path: Repository path
-            paper_id: Optional paper identifier
-
-        Returns:
-            Dictionary mapping phase names to completion status
-        """
+        """Get completion status for all phases."""
         phases = [
             "environment_setup",
             "dataset_preparation",
@@ -323,21 +266,12 @@ class ExperimentCheckpoint:
             "experiment_2",
             "experiment_3",
         ]
-
         completed_phases = set(self.list_phases(repo_path, paper_id))
-
         return {phase: phase in completed_phases for phase in phases}
 
 
 def create_checkpoint_aware_wrapper(func):
-    """Decorator to wrap functions with checkpoint save/resume logic.
-
-    Usage:
-        @create_checkpoint_aware_wrapper
-        def run_experiment(state, checkpoint_manager, phase_name):
-            # Your experiment code here
-            return result
-    """
+    """Decorator to wrap functions with checkpoint save/resume logic."""
 
     def wrapper(
         state,
@@ -348,20 +282,15 @@ def create_checkpoint_aware_wrapper(func):
         *args,
         **kwargs,
     ):
-
-        # Try to resume from checkpoint
         checkpoint_data = checkpoint_manager.resume(repo_path, paper_id)
 
         if checkpoint_data and checkpoint_data["phase"] == phase_name:
             print(f"♻️  Resuming {phase_name} from checkpoint")
-            # Merge checkpoint state with current state
             state.update(checkpoint_data["state"])
             return state
 
-        # Run the function
         result = func(state, *args, **kwargs)
 
-        # Save checkpoint after completion
         if result:
             checkpoint_manager.save(
                 state=result, phase=phase_name, repo_path=repo_path, paper_id=paper_id

@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.git/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Runtime data (mounted as volumes)
+cloned_repo/
+downloads/
+logs/
+checkpoints/
+
+# Large data dirs
+data/
+benchmarks/
+
+# IDE files
+.vscode/
+.idea/
+
+# Secrets
+secrets/
+*.key
+*.pem

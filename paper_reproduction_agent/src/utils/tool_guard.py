@@ -247,9 +247,9 @@ def _ask_user_approval(tool_name: str, content: str, reason: str) -> Tuple[bool,
     from rich.panel import Panel
     from rich.console import Console
     import questionary
-    
+
     console = Console()
-    
+
     alert_text = f"Tool: {tool_name}\n"
     alert_text += f"Reason: {reason}\n"
     alert_text += f"Command:\n{content[:300]}"
@@ -267,7 +267,7 @@ def _ask_user_approval(tool_name: str, content: str, reason: str) -> Tuple[bool,
     except (EOFError, KeyboardInterrupt):
         approval = False
         feedback = ""
-        
+
     return (approval, feedback or "")
 
 

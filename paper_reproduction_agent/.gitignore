@@ -50,6 +50,10 @@ include/
 share/
 
 
+# Credentials (never commit GCP/AWS keys)
+credentials/
+*.json.key
+
 # Safety
 node_modules/
 .next/

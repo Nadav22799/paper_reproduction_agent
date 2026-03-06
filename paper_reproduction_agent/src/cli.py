@@ -236,6 +236,17 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
             # Fresh start
             orchestrator.metrics_tracker.start_workflow()
 
+        # Start experiment DB tracking
+        run_id = orchestrator.start_run_tracking(
+            paper_id=paper_input,
+            config={
+                "max_cycles": max_cycles,
+                "experiment_selection_mode": initial_state.get("experiment_selection_mode", "single"),
+            },
+            critic_mode=critic_mode,
+        )
+        result = {}  # ensure defined for finally block
+
         try:
             # If resuming with pending user input, go straight into the input loop
             # (Planning was already completed & checkpointed but .env wasn't written yet)
@@ -420,6 +431,8 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
             # Stop metrics tracking
             orchestrator.metrics_tracker.end_workflow()
             console.print(Panel(orchestrator.metrics_tracker.get_summary(), title="📊 WORKFLOW METRICS SUMMARY", border_style="cyan"))
+            # Finalize experiment DB record
+            orchestrator.finalize_run_tracking(run_id, result)
 
         console.print(Panel(f"Final Status: [bold]{result.get('final_status', 'Unknown')}[/bold]", title="🏁 Workflow Complete", border_style="green"))
 
@@ -453,6 +466,8 @@ def verify():
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
 
+    load_dotenv()
+
     console.print("Running internal verification...")
 
     checks = []
@@ -476,14 +491,72 @@ def verify():
         else:
             checks.append((f"[red]❌ Missing directory: {d}[/red]", False))
 
+    # Check 3: Required environment variables (API keys)
+    _required_env_groups = [
+        ("LLM Keys", ["GOOGLE_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"]),
+    ]
+    for group_name, vars_in_group in _required_env_groups:
+        found = [v for v in vars_in_group if os.getenv(v)]
+        if found:
+            checks.append((f"✅ {group_name}: {found[0]} is set", True))
+        else:
+            checks.append((f"❌ {group_name}: none of {vars_in_group} are set", False))
+
+    # Check 4: ChromaDB availability
+    try:
+        import chromadb
+        _client = chromadb.Client()
+        checks.append(("✅ ChromaDB: embedded client initializes OK", True))
+    except ImportError:
+        checks.append(("❌ ChromaDB: not installed", False))
+    except Exception as e:
+        checks.append((f"⚠️  ChromaDB: installed but init failed ({e})", False))
+
+    # Check 5: GPU availability (via resource_detector if present)
+    try:
+        from src.utils.resource_detector import detect_resources
+        resources = detect_resources()
+        gpu_info = resources.get("gpu", {})
+        if gpu_info.get("available"):
+            checks.append((f"✅ GPU: {gpu_info.get('name', 'available')}", True))
+        else:
+            checks.append(("ℹ️  GPU: not available (CPU-only mode)", True))
+    except Exception:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                checks.append((f"✅ GPU: {torch.cuda.get_device_name(0)}", True))
+            else:
+                checks.append(("ℹ️  GPU: not available (CPU-only mode)", True))
+        except Exception:
+            checks.append(("ℹ️  GPU: could not detect (torch not loaded)", True))
+
+    # Check 6: Storage backend
+    storage_backend = os.getenv("STORAGE_BACKEND", "local")
+    checks.append((f"ℹ️  Storage backend: {storage_backend.upper()}", True))
+    if storage_backend == "gcs":
+        gcp_ok = bool(os.getenv("GCP_PROJECT_ID")) and bool(os.getenv("GCP_BUCKET_NAME"))
+        if gcp_ok:
+            checks.append(("✅ GCS: GCP_PROJECT_ID and GCP_BUCKET_NAME are set", True))
+        else:
+            checks.append(("❌ GCS: GCP_PROJECT_ID or GCP_BUCKET_NAME missing", False))
+    elif storage_backend == "s3":
+        s3_ok = bool(os.getenv("AWS_S3_BUCKET"))
+        if s3_ok:
+            checks.append(("✅ S3: AWS_S3_BUCKET is set", True))
+        else:
+            checks.append(("❌ S3: AWS_S3_BUCKET missing", False))
+
     # Report
     console.print("\n[bold]System Health Check:[/bold]")
+    console.print("-" * 55)
     all_passed = True
     for msg, passed in checks:
         console.print(msg)
         if not passed:
             all_passed = False
 
+    click.echo("-" * 55)
     if all_passed:
         console.print("\n✨ [bold green]System is ready for reproduction![/bold green]")
     else:

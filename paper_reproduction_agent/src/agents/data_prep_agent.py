@@ -59,6 +59,10 @@ class DataPrepAgent:
         _ddg = DuckDuckGoSearchRun()
         _ddg.handle_tool_error = True
 
+        # Wrap DuckDuckGo so network failures return an error string instead of crashing
+        _ddg = DuckDuckGoSearchRun()
+        _ddg.handle_tool_error = True
+
         self.tools = [
             read_file,
             list_directory,
