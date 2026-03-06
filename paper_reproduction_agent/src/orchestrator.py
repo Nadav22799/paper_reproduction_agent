@@ -1269,7 +1269,7 @@ class PaperReproductionOrchestrator:
 
             # Infer title from first non-empty PDF line when metadata is missing
             if not meta_base.get("title"):
-                lines = [l.strip() for l in full_text.split("\n") if l.strip()]
+                lines = [ln.strip() for ln in full_text.split("\n") if ln.strip()]
                 meta_base["title"] = lines[0][:120] if lines else "Unknown Paper"
                 rprint(f"   Inferred title: {meta_base['title']}")
 

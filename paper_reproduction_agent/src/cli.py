@@ -7,9 +7,6 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-
 console = Console()
 
 # Ensure we can import from src
@@ -22,8 +19,8 @@ try:
 except ImportError:
     pass
 
-from src.orchestrator import PaperReproductionOrchestrator
-from src.config import ReproductionConfig
+from src.orchestrator import PaperReproductionOrchestrator  # noqa: E402
+from src.config import ReproductionConfig  # noqa: E402
 
 
 @click.group(invoke_without_command=True)
@@ -121,7 +118,7 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
 
     try:
         # Re-print title if we skipped the interactive menu
-        if paper_input and not 'settings' in locals():
+        if paper_input and 'settings' not in locals():
              console.print(Panel.fit(
                 Text.assemble(
                     ("Paper Reproduction Agent ", "bold cyan"),
@@ -216,7 +213,7 @@ def reproduce(paper_input, no_logging, no_checkpoints, max_iterations, max_cycle
             initial_state["experiment_selection_mode"] = mode_map[selection]
 
             if selection == "3":
-                custom_input = session.prompt(HTML('<ansicyan><b>Enter experiment names (comma separated): </b></ansicyan>')).strip()
+                custom_input = questionary.text("Enter experiment names (comma separated):").ask() or ""
                 initial_state["custom_experiment_list"] = [
                     e.strip() for e in custom_input.split(",") if e.strip()
                 ]

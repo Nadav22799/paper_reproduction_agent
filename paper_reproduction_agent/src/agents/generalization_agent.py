@@ -10,7 +10,7 @@ This agent runs ONLY after successful validation (match_ratio > 0) and:
 
 import os
 import re
-from typing import Dict, Optional
+from typing import Dict
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -89,8 +89,6 @@ class GeneralizationAgent:
         checklist_path = state.get("checklist_path", "")
         paper_title = state.get("paper_title", "Unknown")
         verification_results = state.get("verification_results", {})
-        reproduction_plan = state.get("reproduction_plan", {})
-
         print("🔬 Generalization Agent: Testing novelty on external data...")
         print(f"   📋 Paper: {paper_title}")
         print(f"   📊 Reproduction match ratio: {verification_results.get('match_ratio', 'N/A')}")

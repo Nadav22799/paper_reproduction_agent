@@ -5,14 +5,13 @@ preventing loss of work when long experiments timeout or crash.
 """
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 import hashlib
 
-from src.utils.storage import StorageProvider, StorageManager, LocalStorageProvider
+from src.utils.storage import StorageProvider, LocalStorageProvider
 
 
 class ExperimentCheckpoint:

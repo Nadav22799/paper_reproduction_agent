@@ -1,7 +1,7 @@
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import shutil
 import json
 
@@ -55,15 +55,13 @@ class TestCriticAgent(unittest.TestCase):
         self.assertFalse(result["is_authorized"])
         self.assertIn("Insufficient reasoning", result["critic_feedback"])
 
-    @patch("src.agents.critic_agent.ChatGoogleGenerativeAI")
-    def test_llm_critic_approval(self, mock_llm_class):
+    def test_llm_critic_approval(self):
         """Test LLM critic approval flow."""
         # Setup mock LLM
         mock_llm_instance = MagicMock()
         mock_llm_instance.invoke.return_value.content = "SAFE: This looks fine."
-        mock_llm_class.return_value = mock_llm_instance
-        
-        critic = CriticAgent(metrics_tracker=self.mock_tracker, enable_llm_critic=True)
+
+        critic = CriticAgent(metrics_tracker=self.mock_tracker, enable_llm_critic=True, llm=mock_llm_instance)
         
         state = {
             "current_reasoning": "I need to run this python script to analyze the data properly as requested.",
@@ -82,15 +80,13 @@ class TestCriticAgent(unittest.TestCase):
         self.assertIn("Approved by LLM", result["critic_feedback"])
         self.assertEqual(critic.llm_inspections, 1)
 
-    @patch("src.agents.critic_agent.ChatGoogleGenerativeAI")
-    def test_llm_critic_blocking(self, mock_llm_class):
+    def test_llm_critic_blocking(self):
         """Test LLM critic blocking flow."""
         # Setup mock LLM
         mock_llm_instance = MagicMock()
         mock_llm_instance.invoke.return_value.content = "DANGEROUS: This deletes system files."
-        mock_llm_class.return_value = mock_llm_instance
-        
-        critic = CriticAgent(metrics_tracker=self.mock_tracker, enable_llm_critic=True)
+
+        critic = CriticAgent(metrics_tracker=self.mock_tracker, enable_llm_critic=True, llm=mock_llm_instance)
         
         state = {
             "current_reasoning": "I need to analyze the system files and delete temp ones.",
